@@ -1,0 +1,86 @@
+name: build-deb
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  build:
+    name: build (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: bookworm
+            image: debian:bookworm
+          - suite: trixie
+            image: debian:trixie
+    container:
+      image: ${{ matrix.image }}
+      options: --user root
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            devscripts \
+            debhelper \
+            fakeroot \
+            lintian \
+            ca-certificates \
+            git \
+            perl \
+            libyaml-libyaml-perl \
+            libjson-perl \
+            libhttp-tiny-perl \
+            libio-socket-ssl-perl \
+            libmodern-perl-perl
+
+      - uses: actions/checkout@v4
+
+      - name: Run unit tests
+        run: |
+          prove -Ilib -r t/
+
+      - name: Build package
+        run: |
+          dpkg-buildpackage -us -uc -b
+
+      - name: Move artifacts into workspace
+        run: |
+          mkdir -p artifacts
+          mv ../*.deb       artifacts/ 2>/dev/null || true
+          mv ../*.buildinfo artifacts/ 2>/dev/null || true
+          mv ../*.changes   artifacts/ 2>/dev/null || true
+          ls -la artifacts/
+
+      - name: Lintian
+        run: |
+          lintian --fail-on error --suppress-tags bad-distribution-in-changes-file artifacts/*.deb || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: koha-starman-worker-watcher_${{ matrix.suite }}
+          path: artifacts/*
+
+  release:
+    name: attach to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Flatten
+        run: |
+          mkdir -p release
+          find dist -name '*.deb' -exec cp {} release/ \;
+          ls -la release/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.deb

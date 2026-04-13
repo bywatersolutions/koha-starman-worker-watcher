@@ -1,0 +1,51 @@
+# koha-starman-worker-watcher configuration
+#
+# This file is a dpkg conffile: local edits survive package upgrades.
+# Restart the service after changing it:
+#   systemctl restart koha-starman-worker-watcher
+
+# How often the daemon rescans /proc for Starman workers.
+poll_interval_seconds: 10
+
+# Alert if a non-idle worker has been running for longer than this many
+# seconds. The daemon fires one runtime alert per (PID, lifetime); it will
+# not re-alert on the same worker again unless that worker dies and the
+# same PID number is reused by a fresh process.
+runtime_threshold_seconds: 300
+
+# Alert if a worker's resident RAM (RSS, from /proc/<pid>/status VmRSS)
+# exceeds this many mebibytes. Swap is reported alongside in the Slack
+# payload for context but does not itself trip an alert.
+memory_threshold_mb: 1024
+
+capture:
+  # When true, attach strace to the offending PID for duration_seconds as
+  # soon as an alert fires, compress the output with streaming gzip, and
+  # include the last attach_tail_lines lines in the Slack message.
+  #
+  # NOTE: strace will noticeably slow the traced worker for the capture
+  # window (especially on I/O-heavy workers). This is generally acceptable
+  # because the worker is already over threshold, but set enabled: false
+  # if you would rather not take the hit.
+  enabled: true
+  duration_seconds: 5
+  output_dir: /var/lib/koha-starman-worker-watcher/captures
+  # Keep at most this many *.strace.gz files in output_dir; older files
+  # are unlinked after each new capture.
+  keep: 50
+  attach_tail_lines: 40
+
+slack:
+  # Incoming webhook URL. Required — the daemon will refuse to start
+  # unless this is set (or --dry-run is passed).
+  webhook_url: ""
+  username: koha-worker-watcher
+  icon_emoji: ":rotating_light:"
+
+# Basenames or full paths of scripts that should never trigger a runtime
+# alert. Typical candidates: long-running report generators.
+ignore_scripts: []
+
+# Koha instance names (as parsed from /etc/koha/sites/<name>/koha-conf.xml)
+# to ignore entirely.
+ignore_instances: []

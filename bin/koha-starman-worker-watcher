@@ -1,0 +1,92 @@
+#!/usr/bin/perl
+
+use Modern::Perl;
+
+use Getopt::Long qw(:config gnu_getopt no_ignore_case);
+use Pod::Usage   qw(pod2usage);
+
+use Koha::StarmanWorkerWatcher;
+
+my $config_path = '/etc/koha-starman-worker-watcher/config.yaml';
+my $dry_run     = 0;
+my $once        = 0;
+my $help        = 0;
+my $version     = 0;
+
+GetOptions(
+    'config|c=s' => \$config_path,
+    'dry-run'    => \$dry_run,
+    'once'       => \$once,
+    'help|h'     => \$help,
+    'version|V'  => \$version,
+) or pod2usage(2);
+
+pod2usage( -verbose => 1 ) if $help;
+
+if ($version) {
+    print "koha-starman-worker-watcher $Koha::StarmanWorkerWatcher::VERSION\n";
+    exit 0;
+}
+
+my $config = Koha::StarmanWorkerWatcher->load_config($config_path);
+
+if ( !$dry_run && !( $config->{slack}{webhook_url} // '' ) ) {
+    die "slack.webhook_url is required in $config_path (or use --dry-run)\n";
+}
+
+my $watcher = Koha::StarmanWorkerWatcher->new(
+    config  => $config,
+    dry_run => $dry_run,
+    log_cb  => sub {
+        my $msg = shift;
+        # systemd captures stdout into journald; prefix with timestamp for
+        # operators who also tail the file.
+        my @t = localtime();
+        printf STDOUT "%04d-%02d-%02dT%02d:%02d:%02d %s\n",
+            $t[5] + 1900, $t[4] + 1, $t[3], $t[2], $t[1], $t[0], $msg;
+        STDOUT->flush;
+    },
+);
+
+if ($once) {
+    $watcher->scan;
+    exit 0;
+}
+
+$watcher->run;
+
+__END__
+
+=head1 NAME
+
+koha-starman-worker-watcher - alert on runaway Koha Starman workers
+
+=head1 SYNOPSIS
+
+  koha-starman-worker-watcher [--config PATH] [--dry-run] [--once]
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--config>, B<-c>
+
+Path to the YAML config file. Defaults to
+F</etc/koha-starman-worker-watcher/config.yaml>.
+
+=item B<--dry-run>
+
+Print Slack payloads to stdout instead of POSTing them. Allows running without
+a configured webhook URL.
+
+=item B<--once>
+
+Run a single scan pass and exit. Useful for smoke testing.
+
+=item B<--version>, B<-V>
+
+Print version and exit.
+
+=back
+
+=cut

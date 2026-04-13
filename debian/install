@@ -1,0 +1,6 @@
+bin/koha-starman-worker-watcher                              usr/sbin
+lib/Koha/StarmanWorkerWatcher.pm                             usr/share/perl5/Koha
+lib/Koha/StarmanWorkerWatcher/Proc.pm                        usr/share/perl5/Koha/StarmanWorkerWatcher
+lib/Koha/StarmanWorkerWatcher/Slack.pm                       usr/share/perl5/Koha/StarmanWorkerWatcher
+lib/Koha/StarmanWorkerWatcher/Capture.pm                     usr/share/perl5/Koha/StarmanWorkerWatcher
+etc/koha-starman-worker-watcher/config.yaml                  etc/koha-starman-worker-watcher

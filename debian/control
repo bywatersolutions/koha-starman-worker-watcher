@@ -1,0 +1,28 @@
+Source: koha-starman-worker-watcher
+Section: admin
+Priority: optional
+Maintainer: Kyle M Hall <kyle@bywatersolutions.com>
+Build-Depends: debhelper-compat (= 13),
+               perl
+Standards-Version: 4.6.2
+Homepage: https://github.com/bywatersolutions/koha-starman-worker-watcher
+Rules-Requires-Root: no
+
+Package: koha-starman-worker-watcher
+Architecture: all
+Depends: ${misc:Depends},
+         ${perl:Depends},
+         perl,
+         libyaml-libyaml-perl,
+         libjson-perl,
+         libhttp-tiny-perl,
+         libio-socket-ssl-perl,
+         libmodern-perl-perl,
+         strace,
+         procps
+Description: monitor and alert on runaway Koha Starman workers
+ A small daemon that periodically scans /proc for Koha Starman worker
+ processes and posts a Slack alert when a worker exceeds configured
+ runtime or memory thresholds. On alert, it captures a streaming-gzipped
+ strace of the offending process and includes the tail in the Slack
+ message. Designed to be installed on Koha hosts and managed by systemd.

@@ -1,0 +1,26 @@
+[Unit]
+Description=Koha Starman worker watcher
+Documentation=https://github.com/bywatersolutions/koha-starman-worker-watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/koha-starman-worker-watcher --config /etc/koha-starman-worker-watcher/config.yaml
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=0
+StandardOutput=journal
+StandardError=journal
+
+# Hardening. Root is required so strace can ptrace workers running as
+# other UIDs and so we can read /proc/<pid>/environ across users.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/koha-starman-worker-watcher
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=false
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_KILL
+
+[Install]
+WantedBy=multi-user.target
