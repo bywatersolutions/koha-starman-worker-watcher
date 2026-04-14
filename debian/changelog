@@ -1,3 +1,29 @@
+koha-starman-worker-watcher (0.2.0) unstable; urgency=medium
+
+  * Perl daemon that scans /proc for Koha Starman workers and alerts to
+    Slack when a worker exceeds a runtime or memory (RSS) threshold.
+  * Resolves Koha instance from the worker's KOHA_CONF environment
+    variable, with a fall-back walk up to the starman master parent.
+  * Reports RSS and swap in the alert payload; threshold is evaluated
+    against RSS only.
+  * AND logic: a worker must exceed both runtime_threshold_seconds
+    and memory_threshold_mb on the same scan pass before an alert
+    fires. Crossing only one threshold is ignored.
+  * One alert per PID lifetime; resets on PID reuse.
+  * Posts a one-line startup notice to Slack on daemon start when
+    slack.webhook_url is set, naming the host and active thresholds.
+  * Optional strace capture on alert with streaming gzip output
+    (strace -o '|gzip -c > ...'), count-based rotation, and the tail of
+    the trace embedded in the Slack message.
+  * slack.enabled config toggle for log-only operation — alerts are
+    still computed, captures still written, full alert text still
+    logged to journald, but no HTTP POST is made.
+  * Ships a systemd unit with Restart=always and hardening flags
+    (ProtectSystem, ProtectHome, PrivateTmp, CapabilityBoundingSet).
+  * Conffile /etc/koha-starman-worker-watcher/config.yaml.
+
+ -- Kyle M Hall <kyle@bywatersolutions.com>  Tue, 14 Apr 2026 12:00:00 +0000
+
 koha-starman-worker-watcher (0.1.0) unstable; urgency=medium
 
   * Initial release.

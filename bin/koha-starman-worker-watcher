@@ -30,8 +30,10 @@ if ($version) {
 
 my $config = Koha::StarmanWorkerWatcher->load_config($config_path);
 
-if ( !$dry_run && !( $config->{slack}{webhook_url} // '' ) ) {
-    die "slack.webhook_url is required in $config_path (or use --dry-run)\n";
+my $slack_enabled = exists $config->{slack}{enabled} ? $config->{slack}{enabled} : 1;
+if ( $slack_enabled && !$dry_run && !( $config->{slack}{webhook_url} // '' ) ) {
+    die "slack.webhook_url is required in $config_path"
+        . " (set slack.enabled: false for log-only mode, or pass --dry-run)\n";
 }
 
 my $watcher = Koha::StarmanWorkerWatcher->new(

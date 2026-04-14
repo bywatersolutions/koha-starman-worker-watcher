@@ -20,10 +20,16 @@ running a CGI through `Plack::App::CGIBin`). For each worker it tracks:
   environment variable, or by walking up to the `starman master` parent),
 - the script path it is currently executing (or `(idle)`).
 
-When a worker crosses `runtime_threshold_seconds` or
-`memory_threshold_mb`, the daemon fires **one** Slack alert per
-`(PID, condition)`. It will not re-alert the same worker again unless
-that PID dies and is reused.
+When a worker is **simultaneously** over `runtime_threshold_seconds`
+**and** `memory_threshold_mb` on the same scan pass, the daemon fires
+**one** Slack alert for that PID. The conditions are ANDed — crossing
+only one threshold is ignored. The daemon will not re-alert the same
+worker again unless that PID dies and is reused.
+
+On startup, if `slack.webhook_url` is set, the daemon also posts a
+one-line heartbeat notice identifying the host and active thresholds.
+This makes it easy to tell from Slack history when the watcher was
+restarted.
 
 ## Install
 
@@ -51,20 +57,36 @@ is annotated. Key knobs:
 | Setting | Default | Notes |
 |---|---|---|
 | `poll_interval_seconds` | 10 | How often the daemon rescans `/proc`. |
-| `runtime_threshold_seconds` | 300 | Alert if a non-idle worker has been running longer than this. |
-| `memory_threshold_mb` | 1024 | Alert if RSS exceeds this. Swap is reported alongside but does not itself trigger the alert. |
+| `runtime_threshold_seconds` | 300 | Minimum worker runtime before it can alert. ANDed with `memory_threshold_mb`. |
+| `memory_threshold_mb` | 1024 | Minimum RSS before the worker can alert. ANDed with `runtime_threshold_seconds`. Swap is reported but not evaluated. |
 | `capture.enabled` | `true` | Attach `strace` on alert. |
 | `capture.duration_seconds` | 5 | How long to trace. Note: strace will slow the traced worker for this window — see "About strace overhead" below. |
 | `capture.keep` | 50 | Maximum `.strace.gz` files to retain. Oldest are unlinked after each new capture. |
 | `capture.attach_tail_lines` | 40 | Lines from the tail of the trace included inline in the Slack message. |
-| `slack.webhook_url` | (unset) | Required. Daemon refuses to start without it (use `--dry-run` to override). |
+| `slack.enabled` | `true` | Set to `false` for log-only mode — alerts still go to journald and captures are still written, but nothing is POSTed and `webhook_url` is not required. |
+| `slack.webhook_url` | (unset) | Required when `slack.enabled` is true. Daemon refuses to start without it (use `--dry-run` to override, or set `slack.enabled: false`). |
 | `ignore_scripts` | `[]` | Basenames or paths to skip for runtime alerts. |
 | `ignore_instances` | `[]` | Koha instance names to skip entirely. |
+
+### Log-only mode
+
+If you would rather scrape alerts from journald than push to Slack, set:
+
+```yaml
+slack:
+  enabled: false
+```
+
+The daemon will start without a `webhook_url`, still run the evaluator,
+still write strace captures to disk, and still log the full formatted
+alert text to journald — it just never contacts Slack. Operational
+entries are prefixed `[log-only slack]` and carry the same multi-line
+format as a normal alert.
 
 ## Alert format
 
 ```
-:rotating_light: Koha worker exceeded runtime threshold
+:rotating_light: Koha worker exceeded runtime and memory thresholds
 Instance: mylib
 PID: 12345
 Script: /usr/share/koha/intranet/cgi-bin/reports/guided_reports.pl

@@ -8,6 +8,7 @@ use JSON::PP qw(encode_json);
 sub new {
     my ( $class, %args ) = @_;
     return bless {
+        enabled     => exists $args{enabled} ? $args{enabled} : 1,
         webhook_url => $args{webhook_url},
         username    => $args{username}   // 'koha-worker-watcher',
         icon_emoji  => $args{icon_emoji} // ':rotating_light:',
@@ -26,7 +27,7 @@ sub format_alert {
     $script = '(idle)' if $script eq '';
 
     my @lines = (
-        ":rotating_light: Koha worker exceeded $alert->{reason} threshold",
+        ":rotating_light: Koha worker exceeded $alert->{reason}",
         "Instance: $alert->{instance}",
         "PID: $alert->{pid}",
         "Script: $script",
@@ -55,13 +56,27 @@ sub format_alert {
 
 sub send_alert {
     my ( $self, $alert ) = @_;
+    return $self->_post( $self->format_alert($alert) );
+}
 
-    my $text    = $self->format_alert($alert);
+sub send_notice {
+    my ( $self, $text ) = @_;
+    return $self->_post($text);
+}
+
+sub _post {
+    my ( $self, $text ) = @_;
+
     my $payload = {
         text       => $text,
         username   => $self->{username},
         icon_emoji => $self->{icon_emoji},
     };
+
+    if ( !$self->{enabled} ) {
+        print STDOUT "[log-only slack] $text\n";
+        return { success => 1, log_only => 1 };
+    }
 
     if ( $self->{dry_run} || !$self->{webhook_url} ) {
         print STDOUT "[dry-run slack] $text\n";

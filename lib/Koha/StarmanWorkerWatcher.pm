@@ -9,7 +9,7 @@ use Koha::StarmanWorkerWatcher::Proc;
 use Koha::StarmanWorkerWatcher::Slack;
 use Koha::StarmanWorkerWatcher::Capture;
 
-our $VERSION = '0.1.0';
+our $VERSION = '0.2.0';
 
 sub new {
     my ( $class, %args ) = @_;
@@ -21,6 +21,7 @@ sub new {
         config    => $config,
         hostname  => $args{hostname}  // hostname(),
         slack     => $args{slack}     // Koha::StarmanWorkerWatcher::Slack->new(
+            enabled     => exists $config->{slack}{enabled} ? $config->{slack}{enabled} : 1,
             webhook_url => $config->{slack}{webhook_url} // '',
             username    => $config->{slack}{username}    // 'koha-worker-watcher',
             icon_emoji  => $config->{slack}{icon_emoji}  // ':rotating_light:',
@@ -114,7 +115,7 @@ sub _track {
             instance    => $info->{instance},
             peak_rss    => $info->{rss_kb},
             peak_swap   => $info->{swap_kb},
-            alerted     => { runtime => 0, memory => 0 },
+            alerted     => 0,
         };
     }
 
@@ -130,31 +131,27 @@ sub _track {
 sub _evaluate {
     my ( $self, $entry, $info ) = @_;
 
-    my $cfg            = $self->{config};
-    my $now            = $self->{now_cb}->();
-    my $runtime        = $now - $entry->{start_epoch};
-    my $rss_mb         = $info->{rss_kb} / 1024;
+    return if $entry->{alerted};
 
-    my $ignored_script   = _is_ignored( $info->{script},   $cfg->{ignore_scripts} );
+    my $cfg     = $self->{config};
+    my $now     = $self->{now_cb}->();
+    my $runtime = $now - $entry->{start_epoch};
+    my $rss_mb  = $info->{rss_kb} / 1024;
+
     my $ignored_instance = _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
     return if $ignored_instance;
 
-    if (  !$entry->{alerted}{runtime}
-        && $runtime > $cfg->{runtime_threshold_seconds}
-        && !$info->{idle}
-        && !$ignored_script )
-    {
-        $entry->{alerted}{runtime} = 1;
-        $self->_dispatch( 'runtime', $entry, $info, $runtime );
-    }
+    my $ignored_script = _is_ignored( $info->{script}, $cfg->{ignore_scripts} );
+    return if $ignored_script;
+    return if $info->{idle};
 
-    if (  !$entry->{alerted}{memory}
-        && $rss_mb > $cfg->{memory_threshold_mb} )
-    {
-        $entry->{alerted}{memory} = 1;
-        $self->_dispatch( 'memory', $entry, $info, $runtime );
-    }
+    # AND logic: both thresholds must be exceeded at the same sample.
+    my $runtime_over = $runtime > $cfg->{runtime_threshold_seconds};
+    my $memory_over  = $rss_mb  > $cfg->{memory_threshold_mb};
+    return unless $runtime_over && $memory_over;
 
+    $entry->{alerted} = 1;
+    $self->_dispatch( 'runtime and memory thresholds', $entry, $info, $runtime );
     return;
 }
 
@@ -215,8 +212,33 @@ sub _dispatch {
 
 sub run {
     my ($self) = @_;
-    my $interval = $self->{config}{poll_interval_seconds};
+    my $cfg      = $self->{config};
+    my $interval = $cfg->{poll_interval_seconds};
     $self->log("koha-starman-worker-watcher started (poll=${interval}s)");
+
+    # Startup notice to Slack. Only sent when a webhook URL is actually
+    # configured; the Slack client still honors enabled/dry_run flags,
+    # so log-only and dry-run runs get a [log-only slack] / [dry-run
+    # slack] line on stdout instead of a real POST.
+    if ( ( $cfg->{slack}{webhook_url} // '' ) ne '' ) {
+        my $notice = sprintf(
+            ':information_source: koha-starman-worker-watcher started on %s'
+                . ' (poll=%ds, thresholds: runtime>%ds AND memory>%dMiB)',
+            $self->{hostname}, $interval,
+            $cfg->{runtime_threshold_seconds},
+            $cfg->{memory_threshold_mb},
+        );
+        my $res = $self->{slack}->send_notice($notice);
+        if ( !$res->{success} ) {
+            $self->log(
+                sprintf(
+                    'slack startup notice failed status=%s reason=%s',
+                    $res->{status} // '?', $res->{reason} // '?'
+                )
+            );
+        }
+    }
+
     local $SIG{TERM} = sub { $self->{_stop} = 1 };
     local $SIG{INT}  = sub { $self->{_stop} = 1 };
     until ( $self->{_stop} ) {

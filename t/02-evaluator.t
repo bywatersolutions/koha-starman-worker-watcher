@@ -19,13 +19,19 @@ use Koha::StarmanWorkerWatcher;
 
 # Capture Slack payloads instead of POSTing them.
 package FakeSlack;
-sub new  { bless { sent => [] }, shift }
+sub new { bless { sent => [], notices => [] }, shift }
 sub send_alert {
     my ( $self, $alert ) = @_;
     push @{ $self->{sent} }, $alert;
     return { success => 1 };
 }
-sub sent { $_[0]->{sent} }
+sub send_notice {
+    my ( $self, $text ) = @_;
+    push @{ $self->{notices} }, $text;
+    return { success => 1 };
+}
+sub sent    { $_[0]->{sent} }
+sub notices { $_[0]->{notices} }
 
 package main;
 
@@ -74,31 +80,67 @@ my $watcher = Koha::StarmanWorkerWatcher->new(
 );
 
 $watcher->scan;
-is( scalar @{ $slack->sent }, 1, 'one alert on first scan over runtime threshold' );
-is( $slack->sent->[0]{reason},   'runtime', 'reason is runtime' );
-is( $slack->sent->[0]{pid},      2001,      'alert pid' );
-is( $slack->sent->[0]{instance}, 'mylib',   'alert instance' );
+is(
+    scalar @{ $slack->sent }, 0,
+    'runtime-over-but-memory-under: AND logic, no alert'
+);
 
-$watcher->scan;
-is( scalar @{ $slack->sent }, 1, 'second scan does not re-alert same pid' );
-
-# Bump memory past threshold and re-scan — should fire the memory alert once.
+# Bump memory past threshold so BOTH conditions are now true at the same sample.
 $fp->add_process(
     pid             => 2001,
     ppid            => 1900,
     comm            => 'starman',
     cmdline         => ['/usr/share/koha/intranet/cgi-bin/reports/guided_reports.pl'],
-    rss_kb          => 700_000,    # 683 MiB, over threshold
+    rss_kb          => 700_000,    # ~683 MiB, over threshold
     swap_kb         => 10_000,
     starttime_ticks => 0,
     env             => { KOHA_CONF => '/etc/koha/sites/mylib/koha-conf.xml' },
 );
 
 $watcher->scan;
-is( scalar @{ $slack->sent }, 2, 'memory alert fires on a subsequent scan' );
-is( $slack->sent->[1]{reason}, 'memory', 'second alert reason is memory' );
+is( scalar @{ $slack->sent }, 1, 'both conditions met: one combined alert' );
+is(
+    $slack->sent->[0]{reason},
+    'runtime and memory thresholds',
+    'combined reason in alert payload'
+);
+is( $slack->sent->[0]{pid},      2001,    'alert pid' );
+is( $slack->sent->[0]{instance}, 'mylib', 'alert instance' );
 
 $watcher->scan;
-is( scalar @{ $slack->sent }, 2, 'memory alert does not repeat' );
+is( scalar @{ $slack->sent }, 1, 'combined alert does not repeat on next scan' );
+
+# A PID whose memory is over but runtime is under should not alert.
+my $young_now = 1700000000 + 10;    # 10s runtime, under 60s threshold
+my $slack2    = FakeSlack->new;
+my $fp2       = FakeProc->new;
+$fp2->activate;
+$fp2->add_process(
+    pid     => 3100,
+    ppid    => 3000,
+    comm    => 'starman',
+    cmdline => [ 'starman', 'master', '/etc/koha/sites/mylib/plack.psgi' ],
+);
+$fp2->add_process(
+    pid             => 3101,
+    ppid            => 3100,
+    comm            => 'starman',
+    cmdline         => ['/usr/share/koha/intranet/cgi-bin/circ/circulation.pl'],
+    rss_kb          => 900_000,    # over memory threshold
+    swap_kb         => 0,
+    starttime_ticks => 0,
+    env             => { KOHA_CONF => '/etc/koha/sites/mylib/koha-conf.xml' },
+);
+my $watcher2 = Koha::StarmanWorkerWatcher->new(
+    config => $config,
+    slack  => $slack2,
+    now_cb => sub { $young_now },
+    log_cb => sub { },
+);
+$watcher2->scan;
+is(
+    scalar @{ $slack2->sent }, 0,
+    'memory-over-but-runtime-under: AND logic, no alert'
+);
 
 done_testing;

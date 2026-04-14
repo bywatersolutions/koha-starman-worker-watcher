@@ -7,15 +7,20 @@
 # How often the daemon rescans /proc for Starman workers.
 poll_interval_seconds: 10
 
-# Alert if a non-idle worker has been running for longer than this many
-# seconds. The daemon fires one runtime alert per (PID, lifetime); it will
-# not re-alert on the same worker again unless that worker dies and the
+# Thresholds are evaluated with AND logic: a worker must exceed BOTH
+# runtime_threshold_seconds AND memory_threshold_mb at the same scan
+# pass for an alert to fire. Crossing only one threshold is ignored.
+# The daemon fires exactly one alert per (PID, lifetime); it will not
+# re-alert on the same worker again unless that worker dies and the
 # same PID number is reused by a fresh process.
+
+# Minimum worker runtime in seconds before it becomes eligible for alerting.
 runtime_threshold_seconds: 300
 
-# Alert if a worker's resident RAM (RSS, from /proc/<pid>/status VmRSS)
-# exceeds this many mebibytes. Swap is reported alongside in the Slack
-# payload for context but does not itself trip an alert.
+# Minimum worker resident RAM (RSS, from /proc/<pid>/status VmRSS) in
+# mebibytes before it becomes eligible for alerting. Swap is reported
+# alongside in the Slack payload for context but does not itself
+# participate in the threshold check.
 memory_threshold_mb: 1024
 
 capture:
@@ -36,8 +41,15 @@ capture:
   attach_tail_lines: 40
 
 slack:
-  # Incoming webhook URL. Required — the daemon will refuse to start
-  # unless this is set (or --dry-run is passed).
+  # Set to false for log-only operation: alerts are still computed,
+  # captures are still written, and the full formatted alert text is
+  # still logged to journald (prefixed "[log-only slack]"), but nothing
+  # is POSTed to Slack and webhook_url is not required. Useful for
+  # testing, air-gapped hosts, or teams that prefer to scrape journald.
+  enabled: true
+
+  # Incoming webhook URL. Required when enabled is true — the daemon
+  # will refuse to start unless this is set (or --dry-run is passed).
   webhook_url: ""
   username: koha-worker-watcher
   icon_emoji: ":rotating_light:"
