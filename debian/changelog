@@ -1,3 +1,17 @@
+koha-starman-worker-watcher (0.3.0) unstable; urgency=medium
+
+  * Auto-kill: new top-level config keys kill_runtime_threshold_seconds
+    and kill_memory_threshold_mb. When at least one is set, workers that
+    exceed the configured kill thresholds are SIGTERMed on first
+    detection and SIGKILLed on the next scan if still alive. Both
+    thresholds are ANDed at evaluation time, but an unset parameter is
+    treated as a wildcard (so you can kill on memory alone, runtime
+    alone, or both). Each signal is logged and posted to Slack as a
+    notice. ignore_scripts/ignore_instances are honored. The startup
+    Slack notice now also reports active kill thresholds when set.
+
+ -- Kyle M Hall <kyle@bywatersolutions.com>  Wed, 15 Apr 2026 12:00:00 +0000
+
 koha-starman-worker-watcher (0.2.0) unstable; urgency=medium
 
   * Perl daemon that scans /proc for Koha Starman workers and alerts to

@@ -9,7 +9,7 @@ use Koha::StarmanWorkerWatcher::Proc;
 use Koha::StarmanWorkerWatcher::Slack;
 use Koha::StarmanWorkerWatcher::Capture;
 
-our $VERSION = '0.2.0';
+our $VERSION = '0.3.0';
 
 sub new {
     my ( $class, %args ) = @_;
@@ -35,6 +35,7 @@ sub new {
         tracked     => {},
         now_cb      => $args{now_cb} // sub { time() },
         log_cb      => $args{log_cb} // sub { print STDERR "@_\n" },
+        kill_cb     => $args{kill_cb} // sub { my ( $sig, $pid ) = @_; return kill( $sig, $pid ); },
     }, $class;
 
     return $self;
@@ -57,6 +58,12 @@ sub load_config {
     $parsed->{ignore_instances}          //= [];
     $parsed->{capture}                   //= {};
     $parsed->{slack}                     //= {};
+
+    # Auto-kill thresholds. Both must be set (defined and > 0) for kill
+    # logic to be active. ANDed at evaluation time, just like the alert
+    # thresholds. Default undef = disabled.
+    $parsed->{kill_runtime_threshold_seconds} //= undef;
+    $parsed->{kill_memory_threshold_mb}       //= undef;
 
     return $parsed;
 }
@@ -110,12 +117,14 @@ sub _track {
 
     if ( !$entry ) {
         $entry = $self->{tracked}{$pid} = {
-            pid         => $pid,
-            start_epoch => $info->{start_epoch},
-            instance    => $info->{instance},
-            peak_rss    => $info->{rss_kb},
-            peak_swap   => $info->{swap_kb},
-            alerted     => 0,
+            pid              => $pid,
+            start_epoch      => $info->{start_epoch},
+            instance         => $info->{instance},
+            peak_rss         => $info->{rss_kb},
+            peak_swap        => $info->{swap_kb},
+            alerted          => 0,
+            sigterm_sent     => 0,
+            sigkill_sent     => 0,
         };
     }
 
@@ -125,6 +134,7 @@ sub _track {
     $entry->{last_info} = $info;
 
     $self->_evaluate( $entry, $info );
+    $self->_evaluate_kill( $entry, $info );
     return;
 }
 
@@ -152,6 +162,74 @@ sub _evaluate {
 
     $entry->{alerted} = 1;
     $self->_dispatch( 'runtime and memory thresholds', $entry, $info, $runtime );
+    return;
+}
+
+sub _evaluate_kill {
+    my ( $self, $entry, $info ) = @_;
+
+    my $cfg          = $self->{config};
+    my $kill_runtime = $cfg->{kill_runtime_threshold_seconds};
+    my $kill_memory  = $cfg->{kill_memory_threshold_mb};
+
+    # Kill is disabled unless at least one threshold is set. When only
+    # one is set, the unset one is ignored (treated as a wildcard).
+    return unless defined $kill_runtime || defined $kill_memory;
+
+    return if _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
+    return if _is_ignored( $info->{script},   $cfg->{ignore_scripts} );
+    return if $info->{idle};
+
+    my $now     = $self->{now_cb}->();
+    my $runtime = $now - $entry->{start_epoch};
+    my $rss_mb  = $info->{rss_kb} / 1024;
+
+    my $runtime_over = !defined $kill_runtime || $runtime > $kill_runtime;
+    my $memory_over  = !defined $kill_memory  || $rss_mb  > $kill_memory;
+    return unless $runtime_over && $memory_over;
+
+    if ( !$entry->{sigterm_sent} ) {
+        $entry->{sigterm_sent} = 1;
+        $self->_kill_worker( 'TERM', $entry, $info, $runtime );
+        return;
+    }
+
+    if ( !$entry->{sigkill_sent} ) {
+        $entry->{sigkill_sent} = 1;
+        $self->_kill_worker( 'KILL', $entry, $info, $runtime );
+    }
+    return;
+}
+
+sub _kill_worker {
+    my ( $self, $signal, $entry, $info, $runtime ) = @_;
+
+    my $sent = $self->{kill_cb}->( $signal, $info->{pid} ) || 0;
+
+    $self->log(
+        sprintf(
+            'kill signal=%s pid=%d instance=%s script=%s runtime=%ds rss_kb=%d sent=%d',
+            $signal,                     $info->{pid}, $info->{instance},
+            $info->{script} // '(idle)', $runtime,     $info->{rss_kb}, $sent
+        )
+    );
+
+    my $rss_mib = sprintf( '%.1f', $info->{rss_kb} / 1024 );
+    my $notice  = sprintf(
+        ':skull: koha-starman-worker-watcher sent SIG%s to runaway worker'
+            . ' on %s (instance=%s pid=%d script=%s runtime=%ds rss=%s MiB)',
+        $signal, $self->{hostname}, $info->{instance}, $info->{pid},
+        $info->{script} // '(idle)', $runtime, $rss_mib,
+    );
+    my $res = $self->{slack}->send_notice($notice);
+    if ( !$res->{success} ) {
+        $self->log(
+            sprintf(
+                'slack kill notice failed pid=%d signal=%s status=%s reason=%s',
+                $info->{pid}, $signal, $res->{status} // '?', $res->{reason} // '?'
+            )
+        );
+    }
     return;
 }
 
@@ -228,6 +306,13 @@ sub run {
             $cfg->{runtime_threshold_seconds},
             $cfg->{memory_threshold_mb},
         );
+        my $kr = $cfg->{kill_runtime_threshold_seconds};
+        my $km = $cfg->{kill_memory_threshold_mb};
+        if ( defined $kr || defined $km ) {
+            my $rt = defined $kr ? "runtime>${kr}s" : 'runtime: any';
+            my $mt = defined $km ? "memory>${km}MiB" : 'memory: any';
+            $notice .= sprintf( ' (auto-kill: %s AND %s)', $rt, $mt );
+        }
         my $res = $self->{slack}->send_notice($notice);
         if ( !$res->{success} ) {
             $self->log(

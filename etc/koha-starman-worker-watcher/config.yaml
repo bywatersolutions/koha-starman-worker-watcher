@@ -23,6 +23,21 @@ runtime_threshold_seconds: 300
 # participate in the threshold check.
 memory_threshold_mb: 1024
 
+# Auto-kill thresholds (optional, both default unset = disabled).
+#
+# When at least one of these is set, the daemon will SIGTERM (and on a
+# subsequent scan, SIGKILL) any worker that exceeds them. Both thresholds
+# are ANDed at evaluation time, but an unset threshold is treated as a
+# wildcard — set just one if you only want to kill on that dimension.
+#
+# These are independent of the alert thresholds above. In practice you
+# will normally set them HIGHER than the alert thresholds so that you
+# get a Slack alert first and only kill workers that are clearly stuck
+# or leaking. A Slack notice is also posted for every signal sent.
+#
+# kill_runtime_threshold_seconds: 1800
+# kill_memory_threshold_mb: 4096
+
 capture:
   # When true, attach strace to the offending PID for duration_seconds as
   # soon as an alert fires, compress the output with streaming gzip, and
