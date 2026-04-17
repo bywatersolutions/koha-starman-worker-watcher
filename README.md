@@ -4,7 +4,10 @@ A small Perl daemon that watches the Starman workers backing each Koha
 instance on a host, and posts a Slack alert when one runs too long or
 eats too much memory. On alert it can attach `strace` to the offending
 worker, stream-compress the trace to disk, and include a tail of it in
-the Slack message so you can see what the worker was stuck on.
+the Slack message so you can see what the worker was stuck on. When a
+worker is auto-killed it also greps `/var/log/koha/<instance>/` for
+`4xx`/`5xx` access-log entries near the kill time so the culprit URL
+shows up alongside the notice.
 
 ## What it does
 
@@ -45,9 +48,10 @@ Operational logs go to journald:
 journalctl -u koha-starman-worker-watcher -f
 ```
 
-Captures live under `/var/lib/koha-starman-worker-watcher/captures/`,
-named `<instance>-<pid>-<timestamp>.strace.gz`. Read them with `zcat` or
-`zless`.
+Captures live under `/var/lib/koha-starman-worker-watcher/captures/`:
+strace captures are named `<instance>-<pid>-<timestamp>.strace.gz`
+(read with `zcat` / `zless`) and kill-time log bundles are named
+`<instance>-<pid>-<timestamp>-<signal>.logs.txt`.
 
 ## Config
 
@@ -82,6 +86,25 @@ The first time a worker crosses the kill thresholds the daemon sends
 `SIGTERM`; if the same PID is still over threshold on the next scan,
 the daemon escalates to `SIGKILL`. Each signal is logged and posted to
 Slack as a notice (`:skull: ... sent SIGTERM ...`).
+
+After sending the signal, the daemon waits ~2s for Apache to notice
+the dropped upstream, then scans these files under
+`/var/log/koha/<instance>/`:
+
+- `opac-access.log`, `intranet-access.log`, `plack.log` — kept if
+  the line's timestamp is within ±60s of the kill **and** the status
+  is `4xx`/`5xx` (this is where the `502 Bad Gateway` lands with the
+  culprit URL).
+- `opac-error.log`, `intranet-error.log` — kept if the line's
+  timestamp is within ±60s of the kill. Multi-line continuations
+  inherit the header line's timestamp.
+- `plack-error.log` — last 20 lines verbatim (the format is
+  inconsistent and usually has no parseable timestamp).
+
+Everything is written to a `.logs.txt` bundle next to the strace
+capture, and the access-log matches are included inline in the
+Slack kill notice. Paths and thresholds are hard-coded; the feature
+has no config knobs.
 
 These thresholds are independent of the alert thresholds above. The
 common pattern is to set them noticeably higher than

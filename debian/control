@@ -18,6 +18,7 @@ Depends: ${misc:Depends},
          libhttp-tiny-perl,
          libio-socket-ssl-perl,
          libmodern-perl-perl,
+         libpath-tiny-perl,
          strace,
          procps
 Description: monitor and alert on runaway Koha Starman workers

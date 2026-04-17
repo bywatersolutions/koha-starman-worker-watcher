@@ -1,3 +1,17 @@
+koha-starman-worker-watcher (0.4.0) unstable; urgency=medium
+
+  * After an auto-kill, grep /var/log/koha/<instance>/ for log lines
+    whose timestamp is within ±60s of the kill, filter the OPAC,
+    intranet, and plack access logs to 4xx/5xx only (where the 502
+    from the killed upstream lands with the culprit URL), bundle the
+    result to <instance>-<pid>-<timestamp>-<signal>.logs.txt next to
+    the strace capture, and include the access-log matches inline in
+    the Slack kill notice. Waits 2s after the signal so Apache has
+    time to flush the 502. No configuration knobs; paths and windows
+    are hard-coded. New dependency: libpath-tiny-perl.
+
+ -- Kyle M Hall <kyle@bywatersolutions.com>  Fri, 17 Apr 2026 12:00:00 +0000
+
 koha-starman-worker-watcher (0.3.0) unstable; urgency=medium
 
   * Auto-kill: new top-level config keys kill_runtime_threshold_seconds

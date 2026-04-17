@@ -8,8 +8,14 @@ use YAML::XS      ();
 use Koha::StarmanWorkerWatcher::Proc;
 use Koha::StarmanWorkerWatcher::Slack;
 use Koha::StarmanWorkerWatcher::Capture;
+use Koha::StarmanWorkerWatcher::Logs;
 
-our $VERSION = '0.3.0';
+our $VERSION = '0.4.0';
+
+# Once the worker has exited, wait this long before grepping so Apache
+# has time to notice the dropped upstream and flush the 502 access-log
+# entry.
+my $POST_KILL_DELAY_SECONDS = 1;
 
 sub new {
     my ( $class, %args ) = @_;
@@ -30,12 +36,15 @@ sub new {
         capture   => $args{capture}   // Koha::StarmanWorkerWatcher::Capture->new(
             %{ $config->{capture} // {} }
         ),
+        logs      => $args{logs}      // Koha::StarmanWorkerWatcher::Logs->new(),
         clock_ticks => Koha::StarmanWorkerWatcher::Proc::clock_ticks(),
         btime       => Koha::StarmanWorkerWatcher::Proc::btime(),
         tracked     => {},
         now_cb      => $args{now_cb} // sub { time() },
         log_cb      => $args{log_cb} // sub { print STDERR "@_\n" },
         kill_cb     => $args{kill_cb} // sub { my ( $sig, $pid ) = @_; return kill( $sig, $pid ); },
+        sleep_cb    => $args{sleep_cb} // sub { my ($s) = @_; sleep $s if $s > 0; },
+        alive_cb    => $args{alive_cb} // sub { my ($pid) = @_; return kill( 0, $pid ) ? 1 : 0; },
     }, $class;
 
     return $self;
@@ -204,7 +213,8 @@ sub _evaluate_kill {
 sub _kill_worker {
     my ( $self, $signal, $entry, $info, $runtime ) = @_;
 
-    my $sent = $self->{kill_cb}->( $signal, $info->{pid} ) || 0;
+    my $kill_time = $self->{now_cb}->();
+    my $sent      = $self->{kill_cb}->( $signal, $info->{pid} ) || 0;
 
     $self->log(
         sprintf(
@@ -214,6 +224,25 @@ sub _kill_worker {
         )
     );
 
+    # Wait for the worker to actually exit before grepping — Apache
+    # does not log the 502 until the upstream connection drops, and
+    # the drop only happens when the worker exits. Poll once a second
+    # until confirmed.
+    my $waited = 0;
+    while ( $self->{alive_cb}->( $info->{pid} ) ) {
+        $self->{sleep_cb}->(1);
+        $waited++;
+    }
+    $self->log(
+        sprintf(
+            'kill confirmed pid=%d signal=%s waited=%ds',
+            $info->{pid}, $signal, $waited
+        )
+    );
+
+    # Give Apache a moment to flush the 502 upstream-gone entry.
+    $self->{sleep_cb}->($POST_KILL_DELAY_SECONDS);
+
     my $rss_mib = sprintf( '%.1f', $info->{rss_kb} / 1024 );
     my $notice  = sprintf(
         ':skull: koha-starman-worker-watcher sent SIG%s to runaway worker'
@@ -221,6 +250,44 @@ sub _kill_worker {
         $signal, $self->{hostname}, $info->{instance}, $info->{pid},
         $info->{script} // '(idle)', $runtime, $rss_mib,
     );
+
+    my $log_result = $self->{logs}->collect(
+        pid       => $info->{pid},
+        instance  => $info->{instance},
+        signal    => $signal,
+        kill_time => $kill_time,
+    );
+    if ( $log_result->{ok} ) {
+        my $matches = $log_result->{access_matches} // [];
+        $self->log(
+            sprintf(
+                'logs collected pid=%d signal=%s bundle=%s access_matches=%d',
+                $info->{pid}, $signal,
+                $log_result->{path} // '', scalar @$matches
+            )
+        );
+        if (@$matches) {
+            my $snippet = join( "\n", @$matches );
+            my $max     = 1500;
+            if ( length $snippet > $max ) {
+                $snippet = substr( $snippet, -$max );
+                $snippet = "...(truncated)...\n$snippet";
+            }
+            $notice .= "\nRecent 4xx/5xx around kill time:\n```\n$snippet\n```";
+        }
+        if ( $log_result->{path} ) {
+            $notice .= "\nFull log bundle: $log_result->{path}";
+        }
+    }
+    elsif ( !$log_result->{skipped} ) {
+        $self->log(
+            sprintf(
+                'log collection failed pid=%d signal=%s error=%s',
+                $info->{pid}, $signal, $log_result->{error} // '?'
+            )
+        );
+    }
+
     my $res = $self->{slack}->send_notice($notice);
     if ( !$res->{success} ) {
         $self->log(
