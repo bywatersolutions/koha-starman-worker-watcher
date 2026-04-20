@@ -10,7 +10,7 @@ use Koha::StarmanWorkerWatcher::Slack;
 use Koha::StarmanWorkerWatcher::Capture;
 use Koha::StarmanWorkerWatcher::Logs;
 
-our $VERSION = '0.4.0';
+our $VERSION = '0.5.0';
 
 # Once the worker has exited, wait this long before grepping so Apache
 # has time to notice the dropped upstream and flush the 502 access-log
@@ -60,17 +60,20 @@ sub load_config {
     my $parsed = YAML::XS::Load($yaml);
     $parsed //= {};
 
-    $parsed->{poll_interval_seconds}     //= 10;
-    $parsed->{runtime_threshold_seconds} //= 300;
-    $parsed->{memory_threshold_mb}       //= 1024;
-    $parsed->{ignore_scripts}            //= [];
-    $parsed->{ignore_instances}          //= [];
-    $parsed->{capture}                   //= {};
-    $parsed->{slack}                     //= {};
+    $parsed->{poll_interval_seconds} //= 10;
+    $parsed->{memory_threshold_mb}   //= 1024;
+    $parsed->{ignore_scripts}        //= [];
+    $parsed->{ignore_instances}      //= [];
+    $parsed->{capture}               //= {};
+    $parsed->{slack}                 //= {};
 
-    # Auto-kill thresholds. Both must be set (defined and > 0) for kill
-    # logic to be active. ANDed at evaluation time, just like the alert
-    # thresholds. Default undef = disabled.
+    # Auto-kill thresholds. Kill is enabled when either is set.
+    # kill_runtime_threshold_seconds is the dwell time a worker must
+    # sustain RSS above memory_threshold_mb before it is killed; if the
+    # worker drops back below memory_threshold_mb the dwell clock resets.
+    # kill_memory_threshold_mb, if set, is an additional current-RSS
+    # bar that must also be exceeded at kill time (ANDed with the dwell
+    # check). Default undef = disabled.
     $parsed->{kill_runtime_threshold_seconds} //= undef;
     $parsed->{kill_memory_threshold_mb}       //= undef;
 
@@ -142,6 +145,18 @@ sub _track {
     $entry->{instance}  = $info->{instance};
     $entry->{last_info} = $info;
 
+    # Dwell tracker: record the first scan where the worker crossed
+    # memory_threshold_mb; clear the marker if it drops back below.
+    # _evaluate_kill uses this to decide when kill_runtime_threshold_seconds
+    # has been sustained.
+    my $rss_mb = $info->{rss_kb} / 1024;
+    if ( $rss_mb > $self->{config}{memory_threshold_mb} ) {
+        $entry->{memory_over_since} //= $self->{now_cb}->();
+    }
+    else {
+        delete $entry->{memory_over_since};
+    }
+
     $self->_evaluate( $entry, $info );
     $self->_evaluate_kill( $entry, $info );
     return;
@@ -152,25 +167,20 @@ sub _evaluate {
 
     return if $entry->{alerted};
 
-    my $cfg     = $self->{config};
-    my $now     = $self->{now_cb}->();
-    my $runtime = $now - $entry->{start_epoch};
-    my $rss_mb  = $info->{rss_kb} / 1024;
+    my $cfg    = $self->{config};
+    my $rss_mb = $info->{rss_kb} / 1024;
 
-    my $ignored_instance = _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
-    return if $ignored_instance;
-
-    my $ignored_script = _is_ignored( $info->{script}, $cfg->{ignore_scripts} );
-    return if $ignored_script;
+    return if _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
+    return if _is_ignored( $info->{script},   $cfg->{ignore_scripts} );
     return if $info->{idle};
 
-    # AND logic: both thresholds must be exceeded at the same sample.
-    my $runtime_over = $runtime > $cfg->{runtime_threshold_seconds};
-    my $memory_over  = $rss_mb  > $cfg->{memory_threshold_mb};
-    return unless $runtime_over && $memory_over;
+    return unless $rss_mb > $cfg->{memory_threshold_mb};
+
+    my $now     = $self->{now_cb}->();
+    my $runtime = $now - $entry->{start_epoch};
 
     $entry->{alerted} = 1;
-    $self->_dispatch( 'runtime and memory thresholds', $entry, $info, $runtime );
+    $self->_dispatch( 'memory threshold', $entry, $info, $runtime );
     return;
 }
 
@@ -181,21 +191,38 @@ sub _evaluate_kill {
     my $kill_runtime = $cfg->{kill_runtime_threshold_seconds};
     my $kill_memory  = $cfg->{kill_memory_threshold_mb};
 
-    # Kill is disabled unless at least one threshold is set. When only
-    # one is set, the unset one is ignored (treated as a wildcard).
+    # Kill is disabled unless at least one threshold is set. Unset
+    # thresholds are wildcards.
     return unless defined $kill_runtime || defined $kill_memory;
 
     return if _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
     return if _is_ignored( $info->{script},   $cfg->{ignore_scripts} );
     return if $info->{idle};
 
-    my $now     = $self->{now_cb}->();
-    my $runtime = $now - $entry->{start_epoch};
-    my $rss_mb  = $info->{rss_kb} / 1024;
+    my $now    = $self->{now_cb}->();
+    my $rss_mb = $info->{rss_kb} / 1024;
 
-    my $runtime_over = !defined $kill_runtime || $runtime > $kill_runtime;
-    my $memory_over  = !defined $kill_memory  || $rss_mb  > $kill_memory;
-    return unless $runtime_over && $memory_over;
+    # Dwell check: if kill_runtime is set, worker must have been
+    # continuously over memory_threshold_mb for that many seconds.
+    # memory_over_since is maintained by _track; it's undef when the
+    # worker is currently below memory_threshold_mb, which also fails
+    # the dwell check (you can't kill for dwell when not currently over).
+    my $dwell_ok;
+    if ( !defined $kill_runtime ) {
+        $dwell_ok = 1;
+    }
+    elsif ( !defined $entry->{memory_over_since} ) {
+        $dwell_ok = 0;
+    }
+    else {
+        $dwell_ok = ( $now - $entry->{memory_over_since} ) > $kill_runtime;
+    }
+
+    my $memory_ok = !defined $kill_memory || $rss_mb > $kill_memory;
+
+    return unless $dwell_ok && $memory_ok;
+
+    my $runtime = $now - $entry->{start_epoch};
 
     if ( !$entry->{sigterm_sent} ) {
         $entry->{sigterm_sent} = 1;
@@ -368,17 +395,17 @@ sub run {
     if ( ( $cfg->{slack}{webhook_url} // '' ) ne '' ) {
         my $notice = sprintf(
             ':information_source: koha-starman-worker-watcher started on %s'
-                . ' (poll=%ds, thresholds: runtime>%ds AND memory>%dMiB)',
+                . ' (poll=%ds, threshold: memory>%dMiB)',
             $self->{hostname}, $interval,
-            $cfg->{runtime_threshold_seconds},
             $cfg->{memory_threshold_mb},
         );
         my $kr = $cfg->{kill_runtime_threshold_seconds};
         my $km = $cfg->{kill_memory_threshold_mb};
         if ( defined $kr || defined $km ) {
-            my $rt = defined $kr ? "runtime>${kr}s" : 'runtime: any';
-            my $mt = defined $km ? "memory>${km}MiB" : 'memory: any';
-            $notice .= sprintf( ' (auto-kill: %s AND %s)', $rt, $mt );
+            my @parts;
+            push @parts, "over memory for >${kr}s" if defined $kr;
+            push @parts, "memory>${km}MiB"         if defined $km;
+            $notice .= sprintf( ' (auto-kill: %s)', join( ' AND ', @parts ) );
         }
         my $res = $self->{slack}->send_notice($notice);
         if ( !$res->{success} ) {

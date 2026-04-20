@@ -1,10 +1,10 @@
 # koha-starman-worker-watcher
 
 A small Perl daemon that watches the Starman workers backing each Koha
-instance on a host, and posts a Slack alert when one runs too long or
-eats too much memory. On alert it can attach `strace` to the offending
-worker, stream-compress the trace to disk, and include a tail of it in
-the Slack message so you can see what the worker was stuck on. When a
+instance on a host, and posts a Slack alert when one exceeds a memory
+threshold. On alert it can attach `strace` to the offending worker,
+stream-compress the trace to disk, and include a tail of it in the
+Slack message so you can see what the worker was stuck on. When a
 worker is auto-killed it also greps `/var/log/koha/<instance>/` for
 `4xx`/`5xx` access-log entries near the kill time so the culprit URL
 shows up alongside the notice.
@@ -23,11 +23,10 @@ running a CGI through `Plack::App::CGIBin`). For each worker it tracks:
   environment variable, or by walking up to the `starman master` parent),
 - the script path it is currently executing (or `(idle)`).
 
-When a worker is **simultaneously** over `runtime_threshold_seconds`
-**and** `memory_threshold_mb` on the same scan pass, the daemon fires
-**one** Slack alert for that PID. The conditions are ANDed, crossing
-only one threshold is ignored. The daemon will not re-alert the same
-worker again unless that PID dies and is reused.
+When a worker's RSS exceeds `memory_threshold_mb` while it is serving
+a request (i.e. not idle), the daemon fires **one** Slack alert for
+that PID. The daemon will not re-alert the same worker again unless
+that PID dies and is reused.
 
 On startup, if `slack.webhook_url` is set, the daemon also posts a
 one-line heartbeat notice identifying the host and active thresholds.
@@ -61,31 +60,43 @@ is annotated. Key knobs:
 | Setting | Default | Notes |
 |---|---|---|
 | `poll_interval_seconds` | 10 | How often the daemon rescans `/proc`. |
-| `runtime_threshold_seconds` | 300 | Minimum worker runtime before it can alert. ANDed with `memory_threshold_mb`. |
-| `memory_threshold_mb` | 1024 | Minimum RSS before the worker can alert. ANDed with `runtime_threshold_seconds`. Swap is reported but not evaluated. |
-| `kill_runtime_threshold_seconds` | (unset) | Optional. When set (and exceeded), the worker becomes eligible for auto-kill. ANDed with `kill_memory_threshold_mb`; an unset parameter is treated as a wildcard. |
-| `kill_memory_threshold_mb` | (unset) | Optional. When set (and exceeded), the worker becomes eligible for auto-kill. ANDed with `kill_runtime_threshold_seconds`; an unset parameter is treated as a wildcard. |
+| `memory_threshold_mb` | 1024 | RSS (from `/proc/<pid>/status VmRSS`) bar above which a non-idle worker fires one alert. Also anchors the kill dwell clock. Swap is reported but not evaluated. |
+| `kill_runtime_threshold_seconds` | (unset) | Optional. Dwell time: a worker must sustain RSS above `memory_threshold_mb` for this many seconds before being killed. If it drops below, the clock resets. |
+| `kill_memory_threshold_mb` | (unset) | Optional. Additional current-RSS bar. When set, the worker must also currently exceed this value at kill time (ANDed with the dwell check). |
 | `capture.enabled` | `true` | Attach `strace` on alert. |
 | `capture.duration_seconds` | 5 | How long to trace. Note: strace will slow the traced worker for this window, see "About strace overhead" below. |
 | `capture.keep` | 50 | Maximum `.strace.gz` files to retain. Oldest are unlinked after each new capture. |
 | `capture.attach_tail_lines` | 40 | Lines from the tail of the trace included inline in the Slack message. |
 | `slack.enabled` | `true` | Set to `false` for log-only mode, alerts still go to journald and captures are still written, but nothing is POSTed and `webhook_url` is not required. |
 | `slack.webhook_url` | (unset) | Required when `slack.enabled` is true. Daemon refuses to start without it (use `--dry-run` to override, or set `slack.enabled: false`). |
-| `ignore_scripts` | `[]` | Basenames or paths to skip for runtime alerts. |
+| `ignore_scripts` | `[]` | Basenames or paths to skip for alerts and kills. |
 | `ignore_instances` | `[]` | Koha instance names to skip entirely. |
 
 ### Auto-kill
 
-If you set `kill_runtime_threshold_seconds` and/or `kill_memory_threshold_mb`,
-the daemon will start signalling workers that exceed them. Both thresholds
-are ANDed at evaluation time, but if you only set one, the unset one is
-treated as a wildcard, so you can kill purely on memory or purely on
-runtime if you prefer.
+Kill is enabled when either `kill_runtime_threshold_seconds` or
+`kill_memory_threshold_mb` is set.
 
-The first time a worker crosses the kill thresholds the daemon sends
-`SIGTERM`; if the same PID is still over threshold on the next scan,
-the daemon escalates to `SIGKILL`. Each signal is logged and posted to
-Slack as a notice (`:skull: ... sent SIGTERM ...`).
+`kill_runtime_threshold_seconds` is a **dwell time**: a worker must
+sustain RSS above `memory_threshold_mb` for that many seconds before
+being killed. If the worker's RSS drops back below
+`memory_threshold_mb` at any scan, the dwell clock resets. This is the
+common case — set `memory_threshold_mb: 1024` and
+`kill_runtime_threshold_seconds: 1800` and the daemon will kill any
+worker that stays above 1 GiB for 30 minutes.
+
+`kill_memory_threshold_mb`, if also set, is an additional
+current-RSS bar that must be exceeded at kill time (ANDed with the
+dwell check). Use it when you want the dwell to apply only to the
+most egregious workers — e.g. "only kill after 30 min over 1 GiB
+**and** currently also over 4 GiB". Set alone (without
+`kill_runtime_threshold_seconds`), it collapses to "kill immediately
+on current RSS alone", bypassing the dwell.
+
+The first time a worker satisfies the kill conditions the daemon
+sends `SIGTERM`; if the same PID is still present on the next scan,
+the daemon escalates to `SIGKILL`. Each signal is logged and posted
+to Slack as a notice (`:skull: ... sent SIGTERM ...`).
 
 After sending the signal, the daemon waits ~2s for Apache to notice
 the dropped upstream, then scans these files under
@@ -106,11 +117,10 @@ capture, and the access-log matches are included inline in the
 Slack kill notice. Paths and thresholds are hard-coded; the feature
 has no config knobs.
 
-These thresholds are independent of the alert thresholds above. The
-common pattern is to set them noticeably higher than
-`runtime_threshold_seconds` / `memory_threshold_mb` so that operators
-get a Slack alert first and only clearly-stuck or leaking workers get
-killed automatically.
+Alerts always fire the first time a non-idle worker crosses
+`memory_threshold_mb`; the kill happens separately on dwell. In
+practice you'll see a Slack alert first and, only if the worker stays
+bloated for `kill_runtime_threshold_seconds`, a follow-up kill notice.
 
 ### Log-only mode
 
@@ -130,7 +140,7 @@ format as a normal alert.
 ## Alert format
 
 ```
-:rotating_light: Koha worker exceeded runtime and memory thresholds
+:rotating_light: Koha worker exceeded memory threshold
 Instance: mylib
 PID: 12345
 Script: /usr/share/koha/intranet/cgi-bin/reports/guided_reports.pl

@@ -37,14 +37,16 @@ sub notices { $_[0]->{notices} }
 
 package main;
 
+# Build a watcher whose now_cb returns a scalar we can advance between
+# scans to simulate dwell time.
 sub make_watcher {
     my (%args) = @_;
-    my $kills  = [];
-    my $slack  = FakeSlack->new;
-    my $w      = Koha::StarmanWorkerWatcher->new(
+    my $kills = [];
+    my $slack = FakeSlack->new;
+    my $w     = Koha::StarmanWorkerWatcher->new(
         config   => $args{config},
         slack    => $slack,
-        now_cb   => sub { $args{now} },
+        now_cb   => $args{now_cb},
         log_cb   => sub { },
         kill_cb  => sub { my ( $sig, $pid ) = @_; push @$kills, [ $sig, $pid ]; return 1; },
         sleep_cb => sub { },
@@ -73,91 +75,84 @@ sub seed_worker {
     );
 }
 
-subtest 'no kill thresholds set: no kills' => sub {
+subtest 'no kill thresholds set: alert fires but no kills' => sub {
     my $fp = FakeProc->new;
     $fp->activate;
     seed_worker( $fp, master_pid => 4000, pid => 4001, rss_kb => 5_000_000 );
 
     my $config = {
-        poll_interval_seconds     => 10,
-        runtime_threshold_seconds => 60,
-        memory_threshold_mb       => 500,
-        ignore_scripts            => [],
-        ignore_instances          => [],
-        capture                   => { enabled => 0 },
-        slack                     => { webhook_url => 'http://example/' },
+        poll_interval_seconds => 10,
+        memory_threshold_mb   => 500,
+        ignore_scripts        => [],
+        ignore_instances      => [],
+        capture               => { enabled => 0 },
+        slack                 => { webhook_url => 'http://example/' },
     };
 
-    my ( $w, $slack, $kills ) = make_watcher( config => $config, now => 1700000000 + 7200 );
+    my $now = 1700000000 + 7200;
+    my ( $w, $slack, $kills ) = make_watcher(
+        config => $config,
+        now_cb => sub { $now },
+    );
     $w->scan;
-    is( scalar @$kills, 0, 'no kill_* config => no signals sent' );
+    is( scalar @$kills,           0, 'no kill_* config => no signals sent' );
     is( scalar @{ $slack->sent }, 1, 'alert still fires' );
 };
 
-subtest 'both kill thresholds set: TERM then KILL on next scan' => sub {
+subtest 'dwell-based kill: TERM after threshold, KILL on next scan' => sub {
     my $fp = FakeProc->new;
     $fp->activate;
     seed_worker( $fp, master_pid => 5000, pid => 5001, rss_kb => 5_000_000 );
 
     my $config = {
         poll_interval_seconds          => 10,
-        runtime_threshold_seconds      => 60,
         memory_threshold_mb            => 500,
         kill_runtime_threshold_seconds => 1800,
-        kill_memory_threshold_mb       => 4096,
         ignore_scripts                 => [],
         ignore_instances               => [],
         capture                        => { enabled => 0 },
         slack                          => { webhook_url => 'http://example/' },
     };
 
-    my ( $w, $slack, $kills ) = make_watcher( config => $config, now => 1700000000 + 7200 );
+    my $now = 1700000000 + 7200;
+    my ( $w, $slack, $kills ) = make_watcher(
+        config => $config,
+        now_cb => sub { $now },
+    );
 
+    # First scan: worker crosses memory_threshold_mb, dwell clock starts
+    # at $now. Dwell = 0, not > 1800 yet, so no kill.
     $w->scan;
-    is( scalar @$kills, 1, 'first scan over-kill-threshold => SIGTERM only' );
+    is( scalar @$kills, 0, 'dwell clock just started: no kill on first scan' );
+
+    # Advance time by 30 minutes + 1s so dwell clears the 1800s threshold.
+    $now += 1801;
+    $w->scan;
+    is( scalar @$kills, 1, 'dwell > kill_runtime_threshold_seconds => SIGTERM' );
     is_deeply( $kills->[0], [ 'TERM', 5001 ], 'TERM sent first' );
     like( $slack->notices->[-1], qr/SIGTERM/, 'slack notice for TERM' );
 
+    # Next scan: still over, sigterm_sent=1 => escalate to SIGKILL.
+    $now += 10;
     $w->scan;
     is( scalar @$kills, 2, 'second scan still over => escalate to SIGKILL' );
     is_deeply( $kills->[1], [ 'KILL', 5001 ], 'KILL sent on escalation' );
     like( $slack->notices->[-1], qr/SIGKILL/, 'slack notice for KILL' );
 
+    $now += 10;
     $w->scan;
     is( scalar @$kills, 2, 'no further signals after SIGKILL' );
 };
 
-subtest 'only kill_memory set: kills on memory alone' => sub {
+subtest 'dwell clock resets if memory drops below threshold' => sub {
     my $fp = FakeProc->new;
     $fp->activate;
-    seed_worker( $fp, master_pid => 6000, pid => 6001, rss_kb => 5_000_000 );
 
-    my $config = {
-        poll_interval_seconds     => 10,
-        runtime_threshold_seconds => 60,
-        memory_threshold_mb       => 500,
-        kill_memory_threshold_mb  => 4096,
-        ignore_scripts            => [],
-        ignore_instances          => [],
-        capture                   => { enabled => 0 },
-        slack                     => { webhook_url => 'http://example/' },
-    };
-
-    # Young worker (10s), well under any reasonable runtime kill bar.
-    my ( $w, $slack, $kills ) = make_watcher( config => $config, now => 1700000000 + 10 );
-    $w->scan;
-    is( scalar @$kills, 1, 'memory-only kill threshold fires regardless of runtime' );
-    is_deeply( $kills->[0], [ 'TERM', 6001 ], 'TERM sent' );
-};
-
-subtest 'only kill_runtime set: kills on runtime alone' => sub {
-    my $fp = FakeProc->new;
-    $fp->activate;
-    seed_worker( $fp, master_pid => 7000, pid => 7001, rss_kb => 100_000 );    # tiny
+    # Start OVER threshold so memory_over_since is set.
+    seed_worker( $fp, master_pid => 5100, pid => 5101, rss_kb => 5_000_000 );
 
     my $config = {
         poll_interval_seconds          => 10,
-        runtime_threshold_seconds      => 60,
         memory_threshold_mb            => 500,
         kill_runtime_threshold_seconds => 1800,
         ignore_scripts                 => [],
@@ -166,20 +161,68 @@ subtest 'only kill_runtime set: kills on runtime alone' => sub {
         slack                          => { webhook_url => 'http://example/' },
     };
 
-    my ( $w, $slack, $kills ) = make_watcher( config => $config, now => 1700000000 + 7200 );
+    my $now = 1700000000 + 7200;
+    my ( $w, undef, $kills ) = make_watcher(
+        config => $config,
+        now_cb => sub { $now },
+    );
+
+    $w->scan;    # dwell starts at t=0
+
+    # Worker drops below threshold ten minutes later.
+    $now += 600;
+    seed_worker( $fp, master_pid => 5100, pid => 5101, rss_kb => 200_000 );
+    $w->scan;    # dwell resets
+
+    # Worker climbs back over threshold. Only twenty minutes of dwell
+    # this time (below the 1800s kill threshold).
+    $now += 600;
+    seed_worker( $fp, master_pid => 5100, pid => 5101, rss_kb => 5_000_000 );
+    $w->scan;    # dwell starts fresh at this $now
+
+    $now += 1200;   # only 20 minutes of dwell
     $w->scan;
-    is( scalar @$kills, 1, 'runtime-only kill threshold fires regardless of memory' );
-    is_deeply( $kills->[0], [ 'TERM', 7001 ], 'TERM sent' );
+    is( scalar @$kills, 0, 'dwell reset after dip: 20 min not enough to kill' );
+
+    # Enough more time to push the fresh dwell past 1800s.
+    $now += 700;    # now 1900s of dwell since the reset
+    $w->scan;
+    is( scalar @$kills, 1, 'fresh dwell now past threshold: kill fires' );
+    is_deeply( $kills->[0], [ 'TERM', 5101 ], 'TERM sent' );
 };
 
-subtest 'kill thresholds not exceeded: no kills' => sub {
+subtest 'only kill_memory set: no dwell, kills on current RSS alone' => sub {
     my $fp = FakeProc->new;
     $fp->activate;
-    seed_worker( $fp, master_pid => 8000, pid => 8001, rss_kb => 700_000 );    # ~683 MiB
+    seed_worker( $fp, master_pid => 6000, pid => 6001, rss_kb => 5_000_000 );
+
+    my $config = {
+        poll_interval_seconds    => 10,
+        memory_threshold_mb      => 500,
+        kill_memory_threshold_mb => 4096,
+        ignore_scripts           => [],
+        ignore_instances         => [],
+        capture                  => { enabled => 0 },
+        slack                    => { webhook_url => 'http://example/' },
+    };
+
+    my $now = 1700000000 + 10;    # young worker
+    my ( $w, undef, $kills ) = make_watcher(
+        config => $config,
+        now_cb => sub { $now },
+    );
+    $w->scan;
+    is( scalar @$kills, 1, 'kill_memory-only fires immediately when over current RSS bar' );
+    is_deeply( $kills->[0], [ 'TERM', 6001 ], 'TERM sent' );
+};
+
+subtest 'kill_memory gate blocks kill when current RSS is below it' => sub {
+    my $fp = FakeProc->new;
+    $fp->activate;
+    seed_worker( $fp, master_pid => 7000, pid => 7001, rss_kb => 700_000 );    # ~683 MiB
 
     my $config = {
         poll_interval_seconds          => 10,
-        runtime_threshold_seconds      => 60,
         memory_threshold_mb            => 500,
         kill_runtime_threshold_seconds => 1800,
         kill_memory_threshold_mb       => 4096,
@@ -189,10 +232,17 @@ subtest 'kill thresholds not exceeded: no kills' => sub {
         slack                          => { webhook_url => 'http://example/' },
     };
 
-    # Memory under kill_memory, runtime over both alert and kill_runtime.
-    my ( $w, undef, $kills ) = make_watcher( config => $config, now => 1700000000 + 7200 );
+    my $now = 1700000000;
+    my ( $w, undef, $kills ) = make_watcher(
+        config => $config,
+        now_cb => sub { $now },
+    );
     $w->scan;
-    is( scalar @$kills, 0, 'AND logic: not all set thresholds met => no kill' );
+    $now += 3600;    # plenty of dwell
+    $w->scan;
+    is( scalar @$kills, 0,
+        'dwell satisfied but current RSS below kill_memory_threshold_mb: no kill'
+    );
 };
 
 subtest 'ignore_instances suppresses kill' => sub {
@@ -202,19 +252,23 @@ subtest 'ignore_instances suppresses kill' => sub {
 
     my $config = {
         poll_interval_seconds          => 10,
-        runtime_threshold_seconds      => 60,
         memory_threshold_mb            => 500,
         kill_runtime_threshold_seconds => 1800,
-        kill_memory_threshold_mb       => 4096,
         ignore_scripts                 => [],
         ignore_instances               => ['mylib'],
         capture                        => { enabled => 0 },
         slack                          => { webhook_url => 'http://example/' },
     };
 
-    my ( $w, undef, $kills ) = make_watcher( config => $config, now => 1700000000 + 7200 );
+    my $now = 1700000000;
+    my ( $w, undef, $kills ) = make_watcher(
+        config => $config,
+        now_cb => sub { $now },
+    );
     $w->scan;
-    is( scalar @$kills, 0, 'ignored instance is not killed' );
+    $now += 3600;
+    $w->scan;
+    is( scalar @$kills, 0, 'ignored instance is not killed even after long dwell' );
 };
 
 done_testing;

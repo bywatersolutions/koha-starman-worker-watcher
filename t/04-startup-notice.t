@@ -27,13 +27,12 @@ package main;
 sub build_watcher {
     my (%cfg_slack) = @_;
     my $config = {
-        poll_interval_seconds     => 10,
-        runtime_threshold_seconds => 300,
-        memory_threshold_mb       => 1024,
-        ignore_scripts            => [],
-        ignore_instances          => [],
-        capture                   => { enabled => 0 },
-        slack                     => { %cfg_slack },
+        poll_interval_seconds => 10,
+        memory_threshold_mb   => 1024,
+        ignore_scripts        => [],
+        ignore_instances      => [],
+        capture               => { enabled => 0 },
+        slack                 => { %cfg_slack },
     };
     my $slack = FakeSlack->new;
     my $w     = Koha::StarmanWorkerWatcher->new(
@@ -57,8 +56,8 @@ sub build_watcher {
     );
     like(
         $slack->notices->[0],
-        qr/runtime>300s AND memory>1024MiB/,
-        'notice mentions thresholds with AND'
+        qr/threshold: memory>1024MiB/,
+        'notice mentions memory threshold'
     );
     is( scalar @{ $slack->sent }, 0, 'no alert on startup' );
 }

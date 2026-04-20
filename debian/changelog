@@ -1,3 +1,18 @@
+koha-starman-worker-watcher (0.5.0) unstable; urgency=medium
+
+  * Drop runtime_threshold_seconds. Alerts now fire on memory crossing
+    alone for non-idle workers (still one-shot per PID lifetime).
+  * kill_runtime_threshold_seconds is now a dwell time: a worker must
+    sustain RSS above memory_threshold_mb for this many seconds before
+    being killed. If the worker drops below memory_threshold_mb at any
+    scan, the dwell clock resets. kill_memory_threshold_mb, when set,
+    is an additional current-RSS gate ANDed with the dwell check.
+    Existing configs that only set kill_memory_threshold_mb keep
+    behaving the same way (kill on current-RSS alone, no dwell).
+    runtime_threshold_seconds in existing configs is now ignored.
+
+ -- Kyle M Hall <kyle@bywatersolutions.com>  Mon, 20 Apr 2026 12:00:00 +0000
+
 koha-starman-worker-watcher (0.4.0) unstable; urgency=medium
 
   * After an auto-kill, grep /var/log/koha/<instance>/ for log lines
