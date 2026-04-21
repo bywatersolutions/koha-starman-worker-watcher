@@ -13,20 +13,22 @@ shows up alongside the notice.
 
 Every `poll_interval_seconds`, the daemon scans `/proc` for processes
 that look like Koha Starman workers (the worker proctitle is
-`starman worker ...` when idle, or the path to a `.pl` script when
-running a CGI through `Plack::App::CGIBin`). For each worker it tracks:
+`starman worker ...`, or the path to a `.pl` script when running a CGI
+through `Plack::App::CGIBin`). For each worker it tracks:
 
 - start time (so it can compute runtime),
 - RSS (resident RAM, from `/proc/<pid>/status` `VmRSS`),
 - swap used (from `VmSwap`),
 - which Koha instance it belongs to (parsed from the `KOHA_CONF`
   environment variable, or by walking up to the `starman master` parent),
-- the script path it is currently executing (or `(idle)`).
+- the script path it is currently executing, if one is detectable from
+  the proctitle (CGIBin rewrites it per request; REST API and plain
+  Plack handlers leave it as `starman worker`, rendered `(none)`).
 
-When a worker's RSS exceeds `memory_threshold_mb` while it is serving
-a request (i.e. not idle), the daemon fires **one** Slack alert for
-that PID. The daemon will not re-alert the same worker again unless
-that PID dies and is reused.
+When a worker's RSS exceeds `memory_threshold_mb`, the daemon fires
+**one** Slack alert for that PID, whether or not a script path is
+visible in the proctitle. The daemon will not re-alert the same worker
+again unless that PID dies and is reused.
 
 On startup, if `slack.webhook_url` is set, the daemon also posts a
 one-line heartbeat notice identifying the host and active thresholds.
@@ -60,7 +62,7 @@ is annotated. Key knobs:
 | Setting | Default | Notes |
 |---|---|---|
 | `poll_interval_seconds` | 10 | How often the daemon rescans `/proc`. |
-| `memory_threshold_mb` | 1024 | RSS (from `/proc/<pid>/status VmRSS`) bar above which a non-idle worker fires one alert. Also anchors the kill dwell clock. Swap is reported but not evaluated. |
+| `memory_threshold_mb` | 1024 | RSS (from `/proc/<pid>/status VmRSS`) bar above which a worker fires one alert. Also anchors the kill dwell clock. Swap is reported but not evaluated. |
 | `kill_runtime_threshold_seconds` | (unset) | Optional. Dwell time: a worker must sustain RSS above `memory_threshold_mb` for this many seconds before being killed. If it drops below, the clock resets. |
 | `kill_memory_threshold_mb` | (unset) | Optional. Additional current-RSS bar. When set, the worker must also currently exceed this value at kill time (ANDed with the dwell check). |
 | `capture.enabled` | `true` | Attach `strace` on alert. |
@@ -117,7 +119,7 @@ capture, and the access-log matches are included inline in the
 Slack kill notice. Paths and thresholds are hard-coded; the feature
 has no config knobs.
 
-Alerts always fire the first time a non-idle worker crosses
+Alerts always fire the first time a worker crosses
 `memory_threshold_mb`; the kill happens separately on dwell. In
 practice you'll see a Slack alert first and, only if the worker stays
 bloated for `kill_runtime_threshold_seconds`, a follow-up kill notice.

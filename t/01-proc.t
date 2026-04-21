@@ -53,12 +53,11 @@ is_deeply(
     'list_pids finds all fake pids'
 );
 
-my $idle = Koha::StarmanWorkerWatcher::Proc::worker_info(1001);
-ok( Koha::StarmanWorkerWatcher::Proc::is_starman_worker($idle), 'idle worker detected as starman worker' );
-is( $idle->{script},   '',      'idle worker has empty script' );
-is( $idle->{idle},     1,       'idle worker marked idle' );
-is( $idle->{instance}, 'mylib', 'instance parsed from KOHA_CONF env' );
-is( $idle->{rss_kb},   50_000,  'rss parsed from VmRSS' );
+my $no_script = Koha::StarmanWorkerWatcher::Proc::worker_info(1001);
+ok( Koha::StarmanWorkerWatcher::Proc::is_starman_worker($no_script), 'bare-proctitle worker detected as starman worker' );
+is( $no_script->{script},   '',      'bare-proctitle worker has empty script' );
+is( $no_script->{instance}, 'mylib', 'instance parsed from KOHA_CONF env' );
+is( $no_script->{rss_kb},   50_000,  'rss parsed from VmRSS' );
 
 my $active = Koha::StarmanWorkerWatcher::Proc::worker_info(1002);
 ok( Koha::StarmanWorkerWatcher::Proc::is_starman_worker($active), 'active worker detected as starman worker (parent is master)' );
@@ -67,7 +66,6 @@ is(
     '/usr/share/koha/intranet/cgi-bin/reports/guided_reports.pl',
     'script captured from cmdline'
 );
-is( $active->{idle},     0,         'active worker not marked idle' );
 is( $active->{instance}, 'mylib',   'instance parsed for active worker' );
 is( $active->{rss_kb},   1_200_000, 'active worker rss' );
 is( $active->{swap_kb},  64_000,    'active worker swap' );

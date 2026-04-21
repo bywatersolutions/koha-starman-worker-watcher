@@ -172,7 +172,6 @@ sub _evaluate {
 
     return if _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
     return if _is_ignored( $info->{script},   $cfg->{ignore_scripts} );
-    return if $info->{idle};
 
     return unless $rss_mb > $cfg->{memory_threshold_mb};
 
@@ -197,7 +196,6 @@ sub _evaluate_kill {
 
     return if _is_ignored( $info->{instance}, $cfg->{ignore_instances} );
     return if _is_ignored( $info->{script},   $cfg->{ignore_scripts} );
-    return if $info->{idle};
 
     my $now    = $self->{now_cb}->();
     my $rss_mb = $info->{rss_kb} / 1024;
@@ -246,8 +244,8 @@ sub _kill_worker {
     $self->log(
         sprintf(
             'kill signal=%s pid=%d instance=%s script=%s runtime=%ds rss_kb=%d sent=%d',
-            $signal,                     $info->{pid}, $info->{instance},
-            $info->{script} // '(idle)', $runtime,     $info->{rss_kb}, $sent
+            $signal,                    $info->{pid}, $info->{instance},
+            _script_label( $info ),     $runtime,     $info->{rss_kb}, $sent
         )
     );
 
@@ -275,7 +273,7 @@ sub _kill_worker {
         ':skull: koha-starman-worker-watcher sent SIG%s to runaway worker'
             . ' on %s (instance=%s pid=%d script=%s runtime=%ds rss=%s MiB)',
         $signal, $self->{hostname}, $info->{instance}, $info->{pid},
-        $info->{script} // '(idle)', $runtime, $rss_mib,
+        _script_label( $info ),      $runtime, $rss_mib,
     );
 
     my $log_result = $self->{logs}->collect(
@@ -327,6 +325,12 @@ sub _kill_worker {
     return;
 }
 
+sub _script_label {
+    my ($info) = @_;
+    my $s = $info->{script} // '';
+    return length $s ? $s : '(none)';
+}
+
 sub _is_ignored {
     my ( $value, $list ) = @_;
     return 0 unless defined $value && $list;
@@ -346,8 +350,8 @@ sub _dispatch {
     $self->log(
         sprintf(
             'alert reason=%s pid=%d instance=%s script=%s runtime=%ds rss_kb=%d swap_kb=%d',
-            $reason,         $info->{pid},    $info->{instance},
-            $info->{script} // '(idle)', $runtime, $info->{rss_kb}, $info->{swap_kb}
+            $reason,                $info->{pid}, $info->{instance},
+            _script_label( $info ), $runtime,     $info->{rss_kb}, $info->{swap_kb}
         )
     );
 

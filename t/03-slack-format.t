@@ -32,9 +32,9 @@ like( $text, qr/Swap: 256\.0 MiB/,  'swap in MiB' );
 like( $text, qr/Host: koha01/,      'host line' );
 like( $text, qr/```\nline a\nline b/, 'capture tail attached as code block' );
 
-my $idle_alert = { %$alert, script => '' };
-like( Koha::StarmanWorkerWatcher::Slack->new->format_alert($idle_alert),
-    qr/Script: \(idle\)/, 'empty script rendered as (idle)' );
+my $no_script_alert = { %$alert, script => '' };
+like( Koha::StarmanWorkerWatcher::Slack->new->format_alert($no_script_alert),
+    qr/Script: \(none\)/, 'empty script rendered as (none)' );
 
 # Log-only mode: enabled => 0 must never touch HTTP, even if webhook_url
 # is set.

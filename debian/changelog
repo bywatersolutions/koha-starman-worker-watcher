@@ -1,7 +1,13 @@
 koha-starman-worker-watcher (0.5.0) unstable; urgency=medium
 
   * Drop runtime_threshold_seconds. Alerts now fire on memory crossing
-    alone for non-idle workers (still one-shot per PID lifetime).
+    alone, for every Starman worker over memory_threshold_mb (still
+    one-shot per PID lifetime). The previous "idle" filter skipped
+    workers whose proctitle was still "starman worker ..." — but that
+    proctitle is also what REST API requests and plain Plack handlers
+    run under, so bloated workers doing real work could evade alerting.
+    The filter is gone; an empty script path is now rendered "(none)"
+    in alerts and logs.
   * kill_runtime_threshold_seconds is now a dwell time: a worker must
     sustain RSS above memory_threshold_mb for this many seconds before
     being killed. If the worker drops below memory_threshold_mb at any

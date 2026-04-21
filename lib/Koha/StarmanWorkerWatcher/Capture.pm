@@ -91,12 +91,23 @@ sub _proc_section {
 sub _gdb_backtrace {
     my ( $self, $pid ) = @_;
 
+    # If the worker is blocked inside a DB call, the SQL is sitting in a
+    # stack frame of libmariadb/libmysqlclient. `frame function` jumps to
+    # that frame if present; when it's not, gdb prints an error and -batch
+    # moves on to the next -ex, so these are safe no-ops on other stacks.
+    # Requires debuginfo for the client lib for arg names to resolve.
     my @cmd = (
         $self->{gdb_binary},
         '-batch', '-nx',
         '-p', $pid,
         '-ex', 'set pagination off',
         '-ex', 'bt',
+        '-ex', 'frame function mysql_real_query',
+        '-ex', 'printf "QUERY: %s\n", stmt_str',
+        '-ex', 'frame function mysql_send_query',
+        '-ex', 'printf "QUERY: %s\n", stmt_str',
+        '-ex', 'frame function mysql_stmt_prepare',
+        '-ex', 'printf "PREPARE: %s\n", stmt_str',
         '-ex', 'detach',
         '-ex', 'quit',
     );

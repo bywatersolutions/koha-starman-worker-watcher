@@ -179,7 +179,6 @@ sub worker_info {
     };
 
     $info->{script}   = _detect_script($info);
-    $info->{idle}     = $info->{script} eq '' ? 1 : 0;
     $info->{instance} = _detect_instance( $pid, $stat->{ppid} );
 
     return $info;

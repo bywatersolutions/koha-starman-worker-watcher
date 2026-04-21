@@ -24,7 +24,7 @@ sub format_alert {
     my $swap_mib = sprintf( '%.1f', ( $alert->{swap_kb} // 0 ) / 1024 );
     my $runtime  = _fmt_duration( $alert->{runtime_seconds} // 0 );
     my $script   = $alert->{script} // '';
-    $script = '(idle)' if $script eq '';
+    $script = '(none)' if $script eq '';
 
     my @lines = (
         ":rotating_light: Koha worker exceeded $alert->{reason}",

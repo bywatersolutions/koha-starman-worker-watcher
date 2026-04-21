@@ -113,7 +113,7 @@ subtest 'memory over threshold: alert fires' => sub {
     is( scalar @{ $slack->sent }, 1, 'alert is one-shot per PID lifetime' );
 };
 
-subtest 'idle worker with high memory does not alert' => sub {
+subtest 'worker with bare starman proctitle still alerts on memory' => sub {
     my $fp = FakeProc->new;
     $fp->activate;
     $fp->add_process(
@@ -127,7 +127,7 @@ subtest 'idle worker with high memory does not alert' => sub {
         ppid            => 1900,
         comm            => 'starman',
         cmdline         => [ 'starman', 'worker', '--pidfile', '/run/koha.pid' ],
-        rss_kb          => 900_000,
+        rss_kb          => 1_200_000,
         starttime_ticks => 0,
         env             => { KOHA_CONF => '/etc/koha/sites/mylib/koha-conf.xml' },
     );
@@ -140,7 +140,9 @@ subtest 'idle worker with high memory does not alert' => sub {
         log_cb => sub { },
     );
     $w->scan;
-    is( scalar @{ $slack->sent }, 0, 'idle worker (no script) does not alert even if over memory' );
+    is( scalar @{ $slack->sent },    1,       'bare-proctitle worker over memory alerts' );
+    is( $slack->sent->[0]{script},   '',      'alert carries empty script' );
+    is( $slack->sent->[0]{instance}, 'mylib', 'alert instance parsed' );
 };
 
 subtest 'ignore_scripts suppresses alert' => sub {
