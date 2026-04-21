@@ -4,18 +4,25 @@ use Modern::Perl;
 
 use File::Path qw(make_path);
 use File::Spec;
-use POSIX      qw(strftime :sys_wait_h);
-use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+use POSIX      qw(strftime);
+
+# One-shot forensic capture: reads a handful of /proc files and fires
+# `gdb -batch -p PID -ex bt -ex detach` at the worker. gdb attaches via
+# ptrace, walks the C stack (with Perl-level frames if libperl has debug
+# symbols), then detaches — the traced process is paused for tens of
+# milliseconds, not for seconds as with continuous strace. That stays
+# well under Apache's ProxyTimeout, so attaching to a healthy-but-busy
+# worker does not cause a 502 in the browser.
 
 sub new {
     my ( $class, %args ) = @_;
     return bless {
-        enabled           => $args{enabled}           // 1,
-        duration_seconds  => $args{duration_seconds}  // 5,
-        output_dir        => $args{output_dir}        // '/var/lib/koha-starman-worker-watcher/captures',
-        keep              => $args{keep}              // 50,
-        attach_tail_lines => $args{attach_tail_lines} // 40,
-        strace_binary     => $args{strace_binary}     // 'strace',
+        enabled     => $args{enabled}     // 1,
+        output_dir  => $args{output_dir}  // '/var/lib/koha-starman-worker-watcher/captures',
+        keep        => $args{keep}        // 50,
+        tail_lines  => $args{tail_lines}  // $args{attach_tail_lines} // 40,
+        gdb_binary  => $args{gdb_binary}  // 'gdb',
+        gdb_timeout => $args{gdb_timeout} // 10,
     }, $class;
 }
 
@@ -29,74 +36,91 @@ sub capture {
     make_path( $self->{output_dir} ) unless -d $self->{output_dir};
 
     my $ts   = strftime( '%Y%m%dT%H%M%SZ', gmtime );
-    my $name = "${instance}-${pid}-${ts}.strace.gz";
+    my $name = "${instance}-${pid}-${ts}.stack.txt";
     my $path = File::Spec->catfile( $self->{output_dir}, $name );
 
-    # strace -o '|cmd' pipes its output through a shell command. We use this
-    # to stream-compress with gzip -c into the destination file, so there is
-    # never an uncompressed intermediate on disk.
-    my $shell_target = sprintf( q{|gzip -c > %s}, _shell_quote($path) );
+    my @sections = (
+        _proc_section( $pid, 'wchan' ),
+        _proc_section( $pid, 'syscall' ),
+        _proc_section( $pid, 'stack' ),
+        $self->_gdb_backtrace($pid),
+    );
 
-    my $child = fork();
-    if ( !defined $child ) {
-        return { ok => 0, error => "fork failed: $!" };
+    my $body = join( "\n\n", @sections ) . "\n";
+
+    if ( !open( my $fh, '>', $path ) ) {
+        return { ok => 0, error => "write failed: $!" };
+    }
+    else {
+        print {$fh} $body;
+        close $fh;
     }
 
-    if ( $child == 0 ) {
-        # Child: exec strace.
-        exec(
-            $self->{strace_binary},
-            '-p', $pid,
-            '-tt',
-            '-s', '256',
-            '-o', $shell_target,
-        );
-        exit(127);
-    }
+    $self->_rotate;
 
-    my $deadline = time() + $self->{duration_seconds};
-    while ( time() < $deadline ) {
-        my $reaped = waitpid( $child, WNOHANG );
-        last if $reaped > 0;
-        select( undef, undef, undef, 0.2 );
+    # Tail: keep the gdb backtrace readable in Slack by taking the last
+    # N lines of the combined body.
+    my @lines = split /\n/, $body;
+    if ( @lines > $self->{tail_lines} ) {
+        @lines = @lines[ -$self->{tail_lines} .. -1 ];
     }
-
-    if ( waitpid( $child, WNOHANG ) == 0 ) {
-        kill 'TERM', $child;
-        my $grace = time() + 2;
-        while ( time() < $grace ) {
-            last if waitpid( $child, WNOHANG ) > 0;
-            select( undef, undef, undef, 0.1 );
-        }
-        kill 'KILL', $child if waitpid( $child, WNOHANG ) == 0;
-        waitpid( $child, 0 );
-    }
-
-    my $tail = $self->_read_tail($path);
-    $self->_rotate();
 
     return {
         ok   => 1,
         path => $path,
-        tail => $tail,
+        tail => join( "\n", @lines ),
     };
 }
 
-sub _read_tail {
-    my ( $self, $gz_path ) = @_;
-    return '' unless -f $gz_path;
+sub _proc_section {
+    my ( $pid, $name ) = @_;
+    my $proc_path = "/proc/$pid/$name";
+    my $content;
+    if ( open my $fh, '<', $proc_path ) {
+        local $/;
+        $content = <$fh>;
+        close $fh;
+        chomp $content if defined $content;
+    }
+    else {
+        $content = "(read failed: $!)";
+    }
+    return "=== $proc_path ===\n" . ( defined $content && length $content ? $content : '(empty)' );
+}
 
-    my $buffer = '';
-    if ( !gunzip( $gz_path => \$buffer ) ) {
-        return '';
+sub _gdb_backtrace {
+    my ( $self, $pid ) = @_;
+
+    my @cmd = (
+        $self->{gdb_binary},
+        '-batch', '-nx',
+        '-p', $pid,
+        '-ex', 'set pagination off',
+        '-ex', 'bt',
+        '-ex', 'detach',
+        '-ex', 'quit',
+    );
+
+    my $out;
+    my $err;
+    my $ok = eval {
+        local $SIG{ALRM} = sub { die "gdb timeout after $self->{gdb_timeout}s\n" };
+        alarm( $self->{gdb_timeout} );
+        open( my $fh, '-|', @cmd ) or die "fork gdb failed: $!\n";
+        local $/;
+        $out = <$fh>;
+        close $fh;
+        alarm 0;
+        1;
+    };
+    if ( !$ok ) {
+        $err = $@;
+        alarm 0;
     }
 
-    my @lines = split /\n/, $buffer;
-    my $n     = $self->{attach_tail_lines};
-    if ( @lines > $n ) {
-        @lines = @lines[ -$n .. -1 ];
-    }
-    return join( "\n", @lines );
+    my $header = "=== gdb backtrace (pid $pid) ===\n";
+    return $header . "(failed: $err)" if defined $err;
+    return $header . ( defined $out && length $out ? $out : '(empty)' );
 }
 
 sub _rotate {
@@ -105,7 +129,7 @@ sub _rotate {
     return if $keep <= 0;
 
     opendir( my $dh, $self->{output_dir} ) or return;
-    my @files = grep { /\.strace\.gz\z/ } readdir($dh);
+    my @files = grep { /\.stack\.txt\z/ } readdir($dh);
     closedir($dh);
 
     my @entries = map {
@@ -120,12 +144,6 @@ sub _rotate {
         unlink $stale->[0];
     }
     return;
-}
-
-sub _shell_quote {
-    my ($s) = @_;
-    $s =~ s/'/'\\''/g;
-    return "'$s'";
 }
 
 1;

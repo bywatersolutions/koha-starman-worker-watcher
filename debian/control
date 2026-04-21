@@ -19,11 +19,12 @@ Depends: ${misc:Depends},
          libio-socket-ssl-perl,
          libmodern-perl-perl,
          libpath-tiny-perl,
-         strace,
+         gdb,
          procps
 Description: monitor and alert on runaway Koha Starman workers
  A small daemon that periodically scans /proc for Koha Starman worker
- processes and posts a Slack alert when a worker exceeds configured
- runtime or memory thresholds. On alert, it captures a streaming-gzipped
- strace of the offending process and includes the tail in the Slack
- message. Designed to be installed on Koha hosts and managed by systemd.
+ processes and posts a Slack alert when a worker exceeds a memory
+ threshold. On alert, it takes a one-shot forensic snapshot via
+ `gdb -batch -p PID -ex bt` plus /proc/PID/{wchan,syscall,stack} and
+ includes the tail in the Slack message. Designed to be installed on
+ Koha hosts and managed by systemd.

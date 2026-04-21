@@ -36,21 +36,22 @@ memory_threshold_mb: 1024
 # kill_memory_threshold_mb: 4096
 
 capture:
-  # When true, attach strace to the offending PID for duration_seconds as
-  # soon as an alert fires, compress the output with streaming gzip, and
-  # include the last attach_tail_lines lines in the Slack message.
-  #
-  # NOTE: strace will noticeably slow the traced worker for the capture
-  # window (especially on I/O-heavy workers). This is generally acceptable
-  # because the worker is already over threshold, but set enabled: false
-  # if you would rather not take the hit.
+  # When true, on alert the watcher reads /proc/<pid>/{wchan,syscall,
+  # stack} and runs `gdb -batch -p <pid> -ex bt -ex detach` against the
+  # offending worker. This is a one-shot stack snapshot: the worker is
+  # paused for tens of milliseconds (not seconds), well under Apache's
+  # ProxyTimeout, so attaching to a healthy-but-busy worker does not
+  # cause a 502 in the browser. Output is written to a plain-text
+  # .stack.txt file under output_dir; the last tail_lines lines are
+  # included inline in the Slack alert.
   enabled: true
-  duration_seconds: 5
   output_dir: /var/lib/koha-starman-worker-watcher/captures
-  # Keep at most this many *.strace.gz files in output_dir; older files
+  # Keep at most this many *.stack.txt files in output_dir; older files
   # are unlinked after each new capture.
   keep: 50
-  attach_tail_lines: 40
+  # Seconds to wait on gdb before giving up (process may be unresponsive).
+  gdb_timeout: 10
+  tail_lines: 40
 
 slack:
   # Set to false for log-only operation: alerts are still computed,
