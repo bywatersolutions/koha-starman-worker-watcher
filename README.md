@@ -65,10 +65,15 @@ is annotated. Key knobs:
 | `memory_threshold_mb` | 1024 | RSS (from `/proc/<pid>/status VmRSS`) bar above which a worker fires one alert. Also anchors the kill dwell clock. Swap is reported but not evaluated. |
 | `kill_runtime_threshold_seconds` | (unset) | Optional. Dwell time: a worker must sustain RSS above `memory_threshold_mb` for this many seconds before being killed. If it drops below, the clock resets. |
 | `kill_memory_threshold_mb` | (unset) | Optional. Additional current-RSS bar. When set, the worker must also currently exceed this value at kill time (ANDed with the dwell check). |
-| `capture.enabled` | `true` | Attach `strace` on alert. |
-| `capture.duration_seconds` | 5 | How long to trace. Note: strace will slow the traced worker for this window, see "About strace overhead" below. |
-| `capture.keep` | 50 | Maximum `.strace.gz` files to retain. Oldest are unlinked after each new capture. |
-| `capture.attach_tail_lines` | 40 | Lines from the tail of the trace included inline in the Slack message. |
+| `capture.enabled` | `true` | Top-level switch for all forensic probes on alert. |
+| `capture.keep` | 50 | Maximum `.stack.txt` (and `.strace.gz`) files to retain. Oldest are unlinked after each new capture. Rotated per-type. |
+| `capture.tail_lines` | 40 | Lines from the tail of the combined capture included inline in the Slack message. |
+| `capture.gdb_enabled` | `false` | Run `gdb -batch -p PID -ex bt -ex detach` as part of the capture. Fast (~ms); does not risk an Apache 502. Requires the `gdb` package. Off by default — opt in per host. |
+| `capture.gdb_timeout` | 10 | Seconds to wait on gdb before giving up. |
+| `capture.strace_enabled` | `false` | Run `strace -p PID` for `strace_duration_seconds` and write a gzipped sidecar. Pauses the worker for the whole window — see "About strace overhead" below. Requires the `strace` package. |
+| `capture.strace_duration_seconds` | 5 | Seconds to trace when `strace_enabled` is on. |
+| `capture.perl_stack_signal` | `false` | Send SIGUSR2 to the worker and slurp a cooperating `Carp::longmess` dump. Requires `plack.psgi` to load `Koha::StarmanWorkerWatcher::Stack`; see the "Perl-level stack trace on alert" section below. Off by default because USR2's default OS disposition is Term. |
+| `capture.perl_stack_wait` | 2 | Seconds to wait for the SIGUSR2 dump file before giving up. |
 | `slack.enabled` | `true` | Set to `false` for log-only mode, alerts still go to journald and captures are still written, but nothing is POSTed and `webhook_url` is not required. |
 | `slack.webhook_url` | (unset) | Required when `slack.enabled` is true. Daemon refuses to start without it (use `--dry-run` to override, or set `slack.enabled: false`). |
 | `ignore_scripts` | `[]` | Basenames or paths to skip for alerts and kills. |
@@ -248,10 +253,10 @@ slack:
 ```
 
 The daemon will start without a `webhook_url`, still run the evaluator,
-still write strace captures to disk, and still log the full formatted
-alert text to journald, it just never contacts Slack. Operational
-entries are prefixed `[log-only slack]` and carry the same multi-line
-format as a normal alert.
+still write captures to disk, and still log the full formatted alert
+text to journald, it just never contacts Slack. Operational entries are
+prefixed `[log-only slack]` and carry the same multi-line format as a
+normal alert.
 
 ## Alert format
 
@@ -266,18 +271,41 @@ Swap: 12.0 MiB
 Host: koha01
 ```
 ```
-(strace tail, fenced)
+(capture tail, fenced — gdb backtrace, strace tail, and/or Perl
+stack, depending on which probes are enabled)
 ```
 
-## About strace overhead
+## About forensic probe overhead
 
-`strace` uses `ptrace`, so every syscall the worker makes is intercepted.
-On an I/O-heavy worker that can be a 10–50× slowdown for the duration of
-the capture. The watcher only attaches *after* the worker has already
-crossed a threshold, so in practice you are slowing down a request that
-was already going to be slow, but if you would rather not pay that
-cost, set `capture.enabled: false` in the config. You will still get the
-Slack alert with PID, instance, script, runtime, RSS, and swap.
+All three optional probes (`gdb_enabled`, `strace_enabled`,
+`perl_stack_signal`) are `false` by default. A fresh install writes a
+`.stack.txt` with only `/proc/<pid>/{wchan,syscall,stack}` — enough to
+see where the worker is parked in the kernel, with no ptrace-attaching
+or signalling. Opt probes in per host after weighing their cost.
+
+**gdb** uses `ptrace` to attach, walk the C stack, and detach. The
+worker is paused for tens of milliseconds, which is well under
+Apache's `ProxyTimeout`, so the browser does not see a 502. Cost is
+the ptrace attach itself and `gdb_timeout` seconds in the worst case
+if the process is unresponsive.
+
+**strace** also uses `ptrace`, but stays attached for the full
+`strace_duration_seconds` window, intercepting every syscall. On an
+I/O-heavy worker that is a 10–50× slowdown for the duration. An
+in-flight request that takes longer than Apache's `ProxyTimeout`
+will return a 502 to the end user. Turn on `strace_enabled` only when
+you specifically need the syscall sequence (I/O stalls, looping
+`read`/`write` patterns, socket behaviour, etc.) and pick a duration
+comfortably under your `ProxyTimeout`.
+
+**SIGUSR2 Perl stack** has essentially no overhead on the worker
+(just a `Carp::longmess` + file write), but requires the plack.psgi
+wire-up — see below. USR2 is dangerous without the handler, which is
+why it is gated separately.
+
+If you want captures off entirely — just the Slack alert with PID,
+instance, script, runtime, RSS, and swap — set `capture.enabled:
+false`.
 
 ## Building from source
 

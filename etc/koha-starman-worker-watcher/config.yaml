@@ -36,22 +36,47 @@ memory_threshold_mb: 1024
 # kill_memory_threshold_mb: 4096
 
 capture:
-  # When true, on alert the watcher reads /proc/<pid>/{wchan,syscall,
-  # stack} and runs `gdb -batch -p <pid> -ex bt -ex detach` against the
-  # offending worker. This is a one-shot stack snapshot: the worker is
-  # paused for tens of milliseconds (not seconds), well under Apache's
-  # ProxyTimeout, so attaching to a healthy-but-busy worker does not
-  # cause a 502 in the browser. Output is written to a plain-text
-  # .stack.txt file under output_dir; the last tail_lines lines are
-  # included inline in the Slack alert.
+  # Top-level switch for all capture probes. When true, on alert the
+  # watcher writes a .stack.txt file under output_dir containing
+  # /proc/<pid>/{wchan,syscall,stack} plus whichever of the optional
+  # probes below are enabled (gdb, strace, SIGUSR2 Perl stack). The
+  # last tail_lines lines of the combined body are included inline in
+  # the Slack alert.
   enabled: true
   output_dir: /var/lib/koha-starman-worker-watcher/captures
-  # Keep at most this many *.stack.txt files in output_dir; older files
-  # are unlinked after each new capture.
+  # Keep at most this many *.stack.txt (and *.strace.gz) files in
+  # output_dir; older files are unlinked after each new capture.
   keep: 50
+  tail_lines: 40
+
+  # gdb backtrace probe. Runs `gdb -batch -p <pid> -ex bt -ex detach`
+  # against the offending worker. One-shot stack snapshot: the worker
+  # is paused for tens of milliseconds (not seconds), well under
+  # Apache's ProxyTimeout, so attaching to a healthy-but-busy worker
+  # does not cause a 502 in the browser. Requires the `gdb` package.
+  # Off by default because ptrace-attaching is still an intrusive
+  # operation; opt in on hosts where you want the C backtrace.
+  gdb_enabled: false
+  gdb_binary: gdb
   # Seconds to wait on gdb before giving up (process may be unresponsive).
   gdb_timeout: 10
-  tail_lines: 40
+
+  # strace probe. Runs `strace -p <pid> -tt -s 256 -o '|gzip -c > file'`
+  # for strace_duration_seconds, streaming the trace into a
+  # <base>.strace.gz sidecar next to the .stack.txt file. The last
+  # tail_lines lines (ungzipped) are folded into the main capture and
+  # Slack tail.
+  #
+  # WARNING: strace ptrace-pauses the worker for the ENTIRE duration.
+  # If strace_duration_seconds exceeds Apache's ProxyTimeout the user
+  # will get a 502 on their in-flight request. The gdb probe is much
+  # cheaper; enable strace only when you need to see the full syscall
+  # sequence (I/O stalls, looping read()/write() patterns, etc.).
+  #
+  # Requires the `strace` package.
+  strace_enabled: false
+  strace_binary: strace
+  strace_duration_seconds: 5
 
   # Perl-level stack trace on alert (SIGUSR2 + cooperating handler).
   #

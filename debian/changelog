@@ -18,12 +18,28 @@ koha-starman-worker-watcher (0.5.0) unstable; urgency=medium
     runtime_threshold_seconds in existing configs is now ignored.
   * New Koha::StarmanWorkerWatcher::Stack module: installs a SIGUSR2
     handler in plack.psgi that writes a Carp::longmess backtrace to
-    /tmp/koha-stack-<pid>.txt. The watcher signals the worker at
-    capture time, slurps the file into the capture bundle (and Slack
-    tail), and unlinks it. Adds Perl-level file/sub/package visibility
-    to captures without requiring debug symbols for libperl (which
-    Debian does not ship). Workers blocked in a C-level call fall
-    back to gdb's backtrace as before.
+    <capture.output_dir>/koha-stack-<pid>.txt. The watcher signals the
+    worker at capture time, slurps the file into the capture bundle
+    (and Slack tail), and unlinks it. Adds Perl-level file/sub/package
+    visibility to captures without requiring debug symbols for libperl
+    (which Debian does not ship). Both sides read output_dir from
+    config.yaml so the path always agrees. Workers blocked in a
+    C-level call fall back to gdb's backtrace as before. Opt-in via
+    capture.perl_stack_signal: SIGUSR2's OS default is Term, and
+    without the cooperating handler the watcher would kill the worker
+    it was trying to inspect. The captures dir is now mode 1777 so
+    koha instance users can drop their own dump files there; sticky
+    bit keeps non-owners from removing each other's files.
+  * Restore strace as an opt-in probe alongside gdb.
+    capture.gdb_enabled and capture.strace_enabled are now independent
+    toggles, both default false — a fresh install writes a minimal
+    .stack.txt with only /proc/<pid>/{wchan,syscall,stack} and no
+    ptrace-attaching; operators opt each probe in per host. Both can
+    run in the same capture. strace output streams into a gzipped
+    <base>.strace.gz sidecar next to the .stack.txt and its tail is
+    folded into the main capture and Slack alert. strace is a
+    Recommends now that it's optional; gdb stays a hard Depends so
+    the probe is always available to turn on.
 
  -- Kyle M Hall <kyle@bywatersolutions.com>  Mon, 20 Apr 2026 12:00:00 +0000
 

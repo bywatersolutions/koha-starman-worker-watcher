@@ -21,10 +21,14 @@ Depends: ${misc:Depends},
          libpath-tiny-perl,
          gdb,
          procps
+Recommends: strace
 Description: monitor and alert on runaway Koha Starman workers
  A small daemon that periodically scans /proc for Koha Starman worker
  processes and posts a Slack alert when a worker exceeds a memory
- threshold. On alert, it takes a one-shot forensic snapshot via
- `gdb -batch -p PID -ex bt` plus /proc/PID/{wchan,syscall,stack} and
- includes the tail in the Slack message. Designed to be installed on
- Koha hosts and managed by systemd.
+ threshold. On alert, it takes a forensic snapshot that always
+ includes /proc/PID/{wchan,syscall,stack} and can optionally run
+ `gdb -batch -p PID -ex bt` (on by default), `strace -p PID` for a
+ configurable window (off by default), and signal a cooperating
+ SIGUSR2 handler in plack.psgi for a Perl-level backtrace. The tail
+ of the combined capture is included in the Slack message. Designed
+ to be installed on Koha hosts and managed by systemd.
