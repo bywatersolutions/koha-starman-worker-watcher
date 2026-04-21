@@ -17,12 +17,14 @@ use POSIX      qw(strftime);
 sub new {
     my ( $class, %args ) = @_;
     return bless {
-        enabled     => $args{enabled}     // 1,
-        output_dir  => $args{output_dir}  // '/var/lib/koha-starman-worker-watcher/captures',
-        keep        => $args{keep}        // 50,
-        tail_lines  => $args{tail_lines}  // $args{attach_tail_lines} // 40,
-        gdb_binary  => $args{gdb_binary}  // 'gdb',
-        gdb_timeout => $args{gdb_timeout} // 10,
+        enabled           => $args{enabled}           // 1,
+        output_dir        => $args{output_dir}        // '/var/lib/koha-starman-worker-watcher/captures',
+        keep              => $args{keep}              // 50,
+        tail_lines        => $args{tail_lines}        // $args{attach_tail_lines} // 40,
+        gdb_binary        => $args{gdb_binary}        // 'gdb',
+        gdb_timeout       => $args{gdb_timeout}       // 10,
+        perl_stack_signal => $args{perl_stack_signal} // 0,
+        perl_stack_wait   => $args{perl_stack_wait}   // 2,
     }, $class;
 }
 
@@ -43,6 +45,7 @@ sub capture {
         _proc_section( $pid, 'wchan' ),
         _proc_section( $pid, 'syscall' ),
         _proc_section( $pid, 'stack' ),
+        $self->_perl_stack($pid),
         $self->_gdb_backtrace($pid),
     );
 
@@ -72,6 +75,58 @@ sub capture {
     };
 }
 
+sub _perl_stack {
+    my ( $self, $pid ) = @_;
+
+    my $header = "=== Perl stack (pid $pid, via SIGUSR2) ===\n";
+
+    # SIGUSR2's default OS disposition is "terminate the process". On a
+    # worker that has not loaded Koha::StarmanWorkerWatcher::Stack in
+    # its plack.psgi, sending USR2 would KILL the worker we're trying
+    # to inspect. Opt-in via capture.perl_stack_signal, so new installs
+    # stay safe until the plack.psgi edit is in place.
+    if ( !$self->{perl_stack_signal} ) {
+        return $header . "(disabled: set capture.perl_stack_signal: true"
+            . " once plack.psgi loads Koha::StarmanWorkerWatcher::Stack)";
+    }
+
+    my $path = $self->{output_dir} . "/koha-stack-$pid.txt";
+
+    # Clear any stale dump so we only read the fresh one.
+    unlink $path;
+
+    if ( !kill( 'USR2', $pid ) ) {
+        return $header . "(kill USR2 failed: $!)";
+    }
+
+    # Perl safe-signals only dispatch between ops; if the worker is stuck
+    # in a long C-level call (e.g. a slow DBI query) the handler won't
+    # fire until control returns to the interpreter. We poll briefly and
+    # give up rather than block the watcher loop.
+    my $waited = 0;
+    my $step   = 0.1;
+    my $max    = $self->{perl_stack_wait};
+    while ( !-e $path && $waited < $max ) {
+        select undef, undef, undef, $step;
+        $waited += $step;
+    }
+
+    if ( !-e $path ) {
+        return $header
+            . "(no dump within ${max}s -- handler not installed, or worker stuck in C)";
+    }
+
+    my $content;
+    if ( open my $fh, '<', $path ) {
+        local $/;
+        $content = <$fh>;
+        close $fh;
+    }
+    unlink $path;
+
+    return $header . ( defined $content && length $content ? $content : '(empty)' );
+}
+
 sub _proc_section {
     my ( $pid, $name ) = @_;
     my $proc_path = "/proc/$pid/$name";
@@ -96,6 +151,9 @@ sub _gdb_backtrace {
     # that frame if present; when it's not, gdb prints an error and -batch
     # moves on to the next -ex, so these are safe no-ops on other stacks.
     # Requires debuginfo for the client lib for arg names to resolve.
+    # Debian's stock perl ships no debuginfo, so reading PL_curcop from
+    # gdb is not feasible; Perl-level backtraces come from the in-process
+    # SIGUSR2 handler instead (see _perl_stack).
     my @cmd = (
         $self->{gdb_binary},
         '-batch', '-nx',

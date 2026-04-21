@@ -16,6 +16,14 @@ koha-starman-worker-watcher (0.5.0) unstable; urgency=medium
     Existing configs that only set kill_memory_threshold_mb keep
     behaving the same way (kill on current-RSS alone, no dwell).
     runtime_threshold_seconds in existing configs is now ignored.
+  * New Koha::StarmanWorkerWatcher::Stack module: installs a SIGUSR2
+    handler in plack.psgi that writes a Carp::longmess backtrace to
+    /tmp/koha-stack-<pid>.txt. The watcher signals the worker at
+    capture time, slurps the file into the capture bundle (and Slack
+    tail), and unlinks it. Adds Perl-level file/sub/package visibility
+    to captures without requiring debug symbols for libperl (which
+    Debian does not ship). Workers blocked in a C-level call fall
+    back to gdb's backtrace as before.
 
  -- Kyle M Hall <kyle@bywatersolutions.com>  Mon, 20 Apr 2026 12:00:00 +0000
 

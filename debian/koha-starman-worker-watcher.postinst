@@ -3,7 +3,13 @@ set -e
 
 case "$1" in
     configure)
-        install -d -m 0750 /var/lib/koha-starman-worker-watcher/captures
+        # Sticky-bit world-writable so Koha instance users (kohadev-koha,
+        # library1-koha, etc.) can drop their SIGUSR2 stack dumps here
+        # when capture.perl_stack_signal is enabled and plack.psgi loads
+        # Koha::StarmanWorkerWatcher::Stack. The watcher (root) reads
+        # and unlinks them; the sticky bit keeps non-owners from removing
+        # each other's files.
+        install -d -m 1777 /var/lib/koha-starman-worker-watcher/captures
         ;;
 esac
 

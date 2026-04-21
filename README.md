@@ -124,6 +124,120 @@ Alerts always fire the first time a worker crosses
 practice you'll see a Slack alert first and, only if the worker stays
 bloated for `kill_runtime_threshold_seconds`, a follow-up kill notice.
 
+### Perl-level stack trace on alert
+
+The gdb backtrace in a capture shows the C stack of the running worker
+(libperl functions like `Perl_pp_multideref`, libmariadb calls, etc.).
+Debian's stock perl does not ship debug symbols, so gdb cannot resolve
+Perl-level variables like `PL_curcop`, which means the file/line of the
+running Perl code isn't reachable from outside the process.
+
+The watcher gets around this by signalling the worker and having the
+worker introspect itself. This requires a one-time edit to each Koha
+instance's `plack.psgi` so that workers carry a `SIGUSR2` handler
+which writes a `Carp::longmess` backtrace to
+`<capture.output_dir>/koha-stack-<pid>.txt`. At capture time the
+watcher sends the signal, waits briefly for the dump to appear,
+slurps its contents into the capture file (and the Slack alert tail),
+and unlinks it.
+
+This is **opt-in** and off by default. `SIGUSR2`'s OS-level default
+disposition is **terminate the process**, so sending it to a worker
+that hasn't loaded the handler would kill the very worker the
+watcher is trying to inspect. Enable it only after completing the
+`plack.psgi` wire-up on every instance served by this host.
+
+#### Wire-up in plack.psgi
+
+Edit `/etc/koha/sites/<instance>/plack.psgi` on every host where the
+watcher runs. Add these two lines near the top of the file, right
+after `use Modern::Perl;` and *before* any Koha module `use` lines,
+so the handler is registered in the starman master and inherited by
+every forked worker:
+
+```perl
+use Koha::StarmanWorkerWatcher::Stack;
+Koha::StarmanWorkerWatcher::Stack->install;
+```
+
+Then restart the instance's plack:
+
+```
+sudo koha-plack --restart <instance>
+```
+
+Once the .deb is installed, `Koha::StarmanWorkerWatcher::Stack` sits
+at `/usr/share/perl5/Koha/StarmanWorkerWatcher/Stack.pm`, which is on
+Debian perl's default `@INC`, so no extra lib path is needed. For dev
+work against an uninstalled checkout, prepend a `use lib '/path/to/
+koha-starman-worker-watcher/lib';` line before the `use` above.
+
+`/etc/koha/sites/<instance>/plack.psgi` is a concrete per-instance
+file created by `koha-create`, not a symlink, so edits are durable
+and survive package upgrades of `koha-common`. Any permanent change
+would need to land in the Koha source template (not in this repo).
+
+`install` reads `capture.output_dir` from
+`/etc/koha-starman-worker-watcher/config.yaml` so the worker and the
+watcher always agree on the dump path; if the config is unreadable
+at plack start (it shouldn't be — it's a dpkg conffile) the handler
+falls back to `/var/lib/koha-starman-worker-watcher/captures`, the
+package default.
+
+The handler is registration-only: it occupies one slot in `%SIG` and
+has no runtime cost unless the watcher actually sends `SIGUSR2`.
+
+#### Turning it on
+
+After every instance's `plack.psgi` is wired up and restarted, flip
+the flag in `config.yaml`:
+
+```yaml
+capture:
+  perl_stack_signal: true
+```
+
+and restart the watcher:
+
+```
+sudo systemctl restart koha-starman-worker-watcher
+```
+
+The package creates `/var/lib/koha-starman-worker-watcher/captures`
+with mode `1777` (sticky-bit world-writable, same discipline as
+`/tmp`) so every instance's worker user can drop its own dump there.
+The watcher runs as root and can always read and unlink. If your
+environment needs stricter permissions, adjust the dir after install
+— the only hard requirement is that every Koha worker user can
+create files in it.
+
+#### Verifying it's wired up
+
+With the handler installed and plack restarted, pick any worker PID
+under `starman master` and signal it by hand:
+
+```
+sudo kill -USR2 <pid>
+ls /var/lib/koha-starman-worker-watcher/captures/koha-stack-<pid>.txt
+```
+
+If the file appears within a second or two, the handler is live.
+Delete the file, then turn on `perl_stack_signal: true` and wait for
+the next alert: captures and Slack tails will carry a
+`=== Perl stack (pid <pid>, via SIGUSR2) ===` section with the full
+Perl backtrace.
+
+#### Limitations
+
+Perl only dispatches safe signals between ops, so a worker blocked
+deep inside a C-level call — a slow DBI query, a blocking `read`,
+`sleep`, etc. — will not produce a dump until control returns to the
+interpreter. In those cases the capture records
+`(no dump within Ns -- handler not installed, or worker stuck in C)`
+and gdb's C backtrace is still the useful piece (libmariadb frames
+for DB stalls, `__skb_wait_for_more_packets` for genuinely idle
+workers, and so on).
+
 ### Log-only mode
 
 If you would rather scrape alerts from journald than push to Slack, set:

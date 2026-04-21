@@ -53,6 +53,23 @@ capture:
   gdb_timeout: 10
   tail_lines: 40
 
+  # Perl-level stack trace on alert (SIGUSR2 + cooperating handler).
+  #
+  # WARNING: do not enable this until every instance's plack.psgi has
+  # loaded Koha::StarmanWorkerWatcher::Stack and called ->install (see
+  # README "Perl-level stack trace on alert"). SIGUSR2's default OS
+  # disposition is "terminate the process"; without the handler, every
+  # capture would kill the worker it was trying to inspect.
+  #
+  # When enabled, the watcher sends SIGUSR2 to the target worker, waits
+  # up to perl_stack_wait seconds for it to write a Carp::longmess dump
+  # to <output_dir>/koha-stack-<pid>.txt, slurps the contents into the
+  # capture (and Slack alert tail), and unlinks the file. The cooperating
+  # handler reads output_dir from this same config file so both sides
+  # always agree on the path.
+  perl_stack_signal: false
+  perl_stack_wait: 2
+
 slack:
   # Set to false for log-only operation: alerts are still computed,
   # captures are still written, and the full formatted alert text is
